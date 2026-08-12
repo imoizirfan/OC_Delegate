@@ -1,0 +1,58 @@
+// Merged into ~/.config/opencode/opencode.jsonc by install.sh under `agent.ocd-delegate`.
+//
+// Permission key forms are NOT uniform, confirmed against opencode
+// v1.18.16's own config validator (not guessed):
+//   - `bash`/`edit`/`read`/`external_directory`/`plan_enter`/`plan_exit`
+//     accept the pattern-map form ({"*": "deny", "some-pattern*": "allow"}).
+//   - `webfetch`/`doom_loop`/`question` REJECT pattern-map outright — using
+//     it here broke config loading entirely (opencode errored with
+//     "Expected PermissionActionConfig | undefined, got {"*":"deny"}"),
+//     which in turn broke every other agent, including the pre-existing
+//     `delegate` one, since an invalid config fails the whole file. Those
+//     three keys only accept the bare-string form.
+// (An earlier pass at this file suspected a second, separate issue — bare
+// strings for `external_directory`/`doom_loop` silently resolving to "ask"
+// instead of the declared "deny" on the pre-existing `delegate` agent.
+// Re-checked directly against `opencode debug agent delegate`'s full
+// resolved permission list: that agent's config also produces multiple
+// entries per (permission, pattern) — base defaults, then this agent's own
+// overrides — and the LAST entry for `doom_loop`/`external_directory` was
+// already "deny", i.e. the override does apply. That first read only
+// caught an early, non-winning entry in the array. `ocd doctor`'s
+// agent_permissions check was already written to take the last matching
+// entry, so no code changed here — only this comment, correcting the
+// record.)
+{
+  "ocd-delegate": {
+    "mode": "primary",
+    "model": "opencode/deepseek-v4-flash-free",
+    "maxSteps": 40,
+    "permission": {
+      "edit": { "*": "allow" },
+      "read": {
+        "*": "allow",
+        "*.env": "ask",
+        "*.env.*": "ask",
+        "*.env.example": "allow"
+      },
+      "bash": {
+        "*": "allow",
+        "git push*": "deny",
+        "git push --force*": "deny",
+        "git reset --hard*": "deny",
+        "rm -rf*": "deny",
+        "sudo*": "deny",
+        "npm publish*": "deny",
+        "npm unpublish*": "deny",
+        "yarn publish*": "deny",
+        "pnpm publish*": "deny"
+      },
+      "webfetch": "deny",
+      "external_directory": { "*": "deny" },
+      "doom_loop": "deny",
+      "question": "deny",
+      "plan_enter": { "*": "deny" },
+      "plan_exit": { "*": "deny" }
+    }
+  }
+}

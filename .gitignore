@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+
+# runtime state (registry db, transcripts) — reproducible, not source
+state/
+*.ndjson
+
+# harness-internal state, not project source
+.claude/

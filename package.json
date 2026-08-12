@@ -1,0 +1,19 @@
+{
+  "name": "ocd",
+  "version": "0.1.0",
+  "description": "Deterministic wrapper CLI that lets Claude Code delegate subtasks to opencode (DeepSeek V4 Flash free) with session continuity, an evidence gate against hallucination, git-verified edits, and a free-model fallback ladder.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ocd": "./bin/ocd"
+  },
+  "scripts": {
+    "test": "bun test/smoke.ts"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14"
+  }
+}
