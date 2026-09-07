@@ -10,17 +10,50 @@ export const REGISTRY_PATH = join(STATE_DIR, "registry.json");
 export const LOCK_PATH = join(STATE_DIR, ".registry.lock");
 export const TRANSCRIPT_DIR = join(STATE_DIR, "transcripts");
 
-// L0/L1 use the same free model (L1 = same model, sharpened prompt on retry).
-// L2 is the alternate-free-model rung, tried in order. L3 is "give up, tell Claude".
-export const MODEL_L0 = "opencode/deepseek-v4-flash-free";
-export const MODEL_L1 = "opencode/deepseek-v4-flash-free";
-export const MODELS_L2 = [
-  "opencode/nemotron-3-ultra-free",
-  "opencode/mimo-v2.5-free",
-  "opencode/hy3-free",
-] as const;
+// --- model selection -------------------------------------------------------
+//
+// No model id is hardcoded anywhere. The provider rotates its free lineup
+// often enough that a pinned id is a guaranteed future outage: the original
+// L0 model ("opencode/deepseek-v4-flash-free") and one of its three L2
+// alternates were both delisted within weeks of being written down, which
+// left the tool dispatching to a model that no longer existed. Models are now
+// discovered from `opencode models --verbose` at runtime, filtered to
+// zero-cost + tool-calling, ranked, and health-checked. See models.ts.
 
-export const VARIANT = "max";
+/** Provider to enumerate. Empty string lists every authenticated provider. */
+export const MODEL_PROVIDER = process.env.OCD_MODEL_PROVIDER ?? "opencode";
+
+/** Escape hatch: pin one model, skipping discovery and health routing. */
+export const MODEL_PIN = process.env.OCD_MODEL || "";
+
+/** Substrings that bias ranking toward specific models, highest priority
+ * first. Empty by default — nothing is favoured by name unless asked. */
+export const MODEL_PREFER = (process.env.OCD_MODEL_PREFER || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+export const MODELS_CACHE_PATH = join(STATE_DIR, "models-cache.json");
+export const MODEL_HEALTH_PATH = join(STATE_DIR, "model-health.json");
+
+/** Re-enumerate models at most this often. Discovery reads opencode's own
+ * on-disk cache and costs ~0.5s, so this is about avoiding repeated spawns
+ * inside one ladder walk, not about avoiding a network call. */
+export const MODELS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** Wall clock for a single health probe. Generous enough for a cold start on
+ * a slow free model (observed: 15s to first token), short enough that walking
+ * a handful of dead candidates stays bearable. */
+export const PROBE_TIMEOUT_MS = 45_000;
+
+/** How long a failing model sits on the bench before it is retried. */
+export const COOLDOWN_MS = {
+  first: 15 * 60 * 1000,
+  second: 60 * 60 * 1000,
+  third: 6 * 60 * 60 * 1000,
+  /** `disabled` / `missing` — will not self-heal within a work session. */
+  structural: 24 * 60 * 60 * 1000,
+};
 
 export const TIMEOUTS_MS: Record<TaskClass, { wall: number; stall: number }> = {
   analyze: { wall: 120_000, stall: 45_000 },
@@ -33,6 +66,15 @@ export const TIMEOUTS_MS: Record<TaskClass, { wall: number; stall: number }> = {
 export const MAX_ROUNDS = 3;
 // L0..L3 rungs on the fallback ladder.
 export const MAX_LADDER = 4;
+/** Most alternate models the ladder will walk before escalating to Claude.
+ *
+ * Bounds worst-case latency, which discovery would otherwise make unbounded:
+ * the rung counter stays at 2 while walking alternates, so without this cap a
+ * lineup of N free models could cost N sequential dispatches, and at the edit
+ * class's 120s stall window that is many minutes of hanging before Claude is
+ * ever told. Three matches the original fixed L2 list length — past that,
+ * handing back to Claude beats trying yet another free model. */
+export const MAX_ALT_MODELS = 3;
 // Global concurrent-process cap so parallel --bg dispatch doesn't trip free-tier rate limits.
 export const CONCURRENCY_CAP = 4;
 

@@ -1,5 +1,5 @@
 import { openSync, closeSync, appendFileSync } from "node:fs";
-import { OPENCODE_BIN, AGENT_NAME, VARIANT, TIMEOUTS_MS, STALL_POLL_MS, KILL_GRACE_MS } from "./config.ts";
+import { OPENCODE_BIN, AGENT_NAME, TIMEOUTS_MS, STALL_POLL_MS, KILL_GRACE_MS } from "./config.ts";
 import type { RawEvent, TaskClass, TokenUsage } from "./types.ts";
 
 export interface DispatchOptions {
@@ -11,7 +11,11 @@ export interface DispatchOptions {
   sessionId?: string;
   /** Override the default free model (used by the fallback ladder). */
   model?: string;
-  /** Defaults to config.VARIANT; pass "" to omit --variant entirely. */
+  /** Effort variant for this specific model, from models.ts `pickVariant`.
+   * Omitted or "" sends no `--variant` flag at all, which is correct for the
+   * many models that publish no variants. There is deliberately no default:
+   * a global default was previously hardcoded to "max", a value that no
+   * model actually publishes. */
   variant?: string;
   agent?: string;
 }
@@ -25,6 +29,19 @@ export interface ToolUseRecord {
   error?: string;
 }
 
+/** A provider-level failure reported by opencode itself.
+ *
+ * `message` is the clean, structured reason ("Model is disabled") and is the
+ * ONLY thing that should be pattern-matched. The surrounding event carries a
+ * `statusCode` that is actively misleading — a disabled model is reported as
+ * `401`, which a naive regex over the raw JSON would classify as an expired
+ * login and escalate instead of switching models. */
+export interface ApiErrorRecord {
+  message: string;
+  statusCode?: number;
+  isRetryable?: boolean;
+}
+
 export interface DispatchResult {
   rawStatus: RawStatus;
   exitCode: number | null;
@@ -36,6 +53,8 @@ export interface DispatchResult {
   durationMs: number;
   stderrTail: string;
   malformedLines: number;
+  /** Set when opencode emitted a `type: "error"` event. */
+  apiError: ApiErrorRecord | null;
 }
 
 // Ground-truthed against a live denial (see plan doc): opencode returns this
@@ -60,8 +79,7 @@ export async function dispatch(opts: DispatchOptions): Promise<DispatchResult> {
   const args = ["run", "--agent", opts.agent ?? AGENT_NAME, "--format", "json", "--dir", opts.dir];
   if (opts.sessionId) args.push("--session", opts.sessionId);
   if (opts.model) args.push("--model", opts.model);
-  const variant = opts.variant === undefined ? VARIANT : opts.variant;
-  if (variant) args.push("--variant", variant);
+  if (opts.variant) args.push("--variant", opts.variant);
   args.push(opts.prompt);
 
   const { wall, stall } = TIMEOUTS_MS[opts.taskClass];
@@ -95,6 +113,7 @@ export async function dispatch(opts: DispatchOptions): Promise<DispatchResult> {
       durationMs: Date.now() - startedAt,
       stderrTail: String(err),
       malformedLines: 0,
+      apiError: null,
     };
   }
 
@@ -105,6 +124,7 @@ export async function dispatch(opts: DispatchOptions): Promise<DispatchResult> {
   let tokens: TokenUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   let cost = 0;
   let malformedLines = 0;
+  let apiError: ApiErrorRecord | null = null;
   let rawStatus: RawStatus = "completed";
   let killed = false;
 
@@ -151,6 +171,22 @@ export async function dispatch(opts: DispatchOptions): Promise<DispatchResult> {
       return;
     }
     if (evt.sessionID) sessionId = evt.sessionID;
+
+    // Provider failures arrive as their own event type on stdout, not on
+    // stderr. Without capturing this a disabled/geo-blocked/delisted model
+    // is indistinguishable from a model that simply said nothing.
+    if (evt.type === "error" && evt.error) {
+      const msg = evt.error.data?.message;
+      if (typeof msg === "string" && msg && !apiError) {
+        apiError = {
+          message: msg,
+          statusCode: evt.error.data?.statusCode,
+          isRetryable: evt.error.data?.isRetryable,
+        };
+      }
+      return;
+    }
+
     const part = evt.part;
     if (!part) return;
     if (part.type === "text" && typeof part.text === "string") {
@@ -221,5 +257,6 @@ export async function dispatch(opts: DispatchOptions): Promise<DispatchResult> {
     durationMs: Date.now() - startedAt,
     stderrTail,
     malformedLines,
+    apiError,
   };
 }

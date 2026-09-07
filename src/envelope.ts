@@ -18,6 +18,10 @@ function buildErrorSummary(status: Envelope["status"], result: LadderRunResult):
   if (status === "timeout") return "wall-clock timeout exceeded before the task finished";
   if (status === "stalled") return "no output for longer than the stall window — likely hung or rate-limited";
   if (status === "error") {
+    // opencode's structured message is far more useful to Claude than a
+    // stderr tail, and under `--format json` stderr is usually empty anyway.
+    const api = dispatchResult.apiError?.message?.trim();
+    if (api) return `error: ${api}`;
     const tail = dispatchResult.stderrTail.trim().slice(-300);
     return tail ? `error: ${tail}` : "error: opencode exited without a usable result";
   }
@@ -55,5 +59,6 @@ export function buildEnvelope(params: {
     transcript: transcriptPath,
     next: deriveNext(status, warnings.length),
     error: buildErrorSummary(status, ladderResult),
+    ...(ladderResult.modelWarnings?.length ? { model_notes: ladderResult.modelWarnings } : {}),
   };
 }

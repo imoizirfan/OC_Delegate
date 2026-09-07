@@ -50,6 +50,11 @@ export interface Envelope {
   transcript: string;
   next: NextAction;
   error?: string;
+  /** Non-fatal notes about how the model was chosen (stale cache, pinned
+   * model, empty lineup). Deliberately separate from `warnings`, which are
+   * evidence-gate findings and drive `next` — a discovery note says nothing
+   * about whether the work itself is trustworthy. Omitted when empty. */
+  model_notes?: string[];
 }
 
 export interface SessionEntry {
@@ -109,9 +114,22 @@ export interface RawPart {
   cost?: number;
 }
 
+/** A `type: "error"` NDJSON event. Under `--format json` opencode reports
+ * provider-level failures here on STDOUT rather than on stderr, which is why
+ * a failing dispatch can otherwise look merely `empty`. */
+export interface RawErrorEvent {
+  name?: string;
+  data?: {
+    message?: string;
+    statusCode?: number;
+    isRetryable?: boolean;
+  };
+}
+
 export interface RawEvent {
   type: string;
   timestamp: number;
   sessionID?: string;
   part?: RawPart;
+  error?: RawErrorEvent;
 }

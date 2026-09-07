@@ -55,6 +55,7 @@ function fakeDispatch(overrides: Partial<DispatchResult>): DispatchResult {
     durationMs: 100,
     stderrTail: "",
     malformedLines: 0,
+    apiError: null,
     ...overrides,
   };
 }
@@ -294,11 +295,64 @@ async function checkContextSavings(goldenEnvelope: any) {
   );
 }
 
+// --- 7. dynamic model selection (live) ----------------------------------------
+
+/** Asserts against the REAL installed opencode that model selection resolves
+ * to a usable, genuinely free model — the property that silently broke when
+ * the provider retired the previously hardcoded lineup. Offline logic for
+ * this is covered exhaustively in test/models.test.ts; this is the live half. */
+async function checkModelSelection() {
+  const { stdout, code } = await runOcd(["models"]);
+  let doc: any;
+  try {
+    doc = JSON.parse(stdout);
+  } catch {
+    record("model_selection:resolves", false, `unparseable output: ${stdout.slice(0, 200)}`);
+    return;
+  }
+
+  record(
+    "model_selection:resolves",
+    code === 0 && !!doc.selected,
+    `selected=${doc.selected ?? "none"} variant=${doc.variant ?? "none"} candidates=${doc.candidates?.length ?? 0}`,
+  );
+
+  // Nothing may be selected that is not discovered at runtime.
+  const ids: string[] = (doc.candidates ?? []).map((c: any) => c.id);
+  record(
+    "model_selection:selected_is_discovered",
+    !doc.selected || ids.includes(doc.selected),
+    `selected=${doc.selected} in ${ids.length} discovered candidates`,
+  );
+
+  // The selected model must not be one currently known-broken.
+  const selectedEntry = (doc.candidates ?? []).find((c: any) => c.id === doc.selected);
+  record(
+    "model_selection:selected_not_benched",
+    !!selectedEntry && selectedEntry.benched === false,
+    `benched=${selectedEntry?.benched}`,
+  );
+
+  // A variant is only ever sent when the model actually publishes it — the
+  // old code sent a hardcoded "max" that no model in the lineup supports.
+  const badVariant = (doc.candidates ?? []).find(
+    (c: any) => c.variant_used && !(c.variants ?? []).includes(c.variant_used),
+  );
+  record(
+    "model_selection:variant_is_published_by_model",
+    !badVariant,
+    badVariant ? `${badVariant.id} would send unsupported '${badVariant.variant_used}'` : "all variants valid",
+  );
+}
+
 // --- run everything ------------------------------------------------------------
 
 async function main() {
   console.log("=== fault injection (pure functions) ===");
   checkFaultInjection();
+
+  console.log("\n=== dynamic model selection ===");
+  await checkModelSelection();
 
   console.log("\n=== golden regression: reproduced hallucination ===");
   const goldenEnvelope = await checkGoldenRegression();

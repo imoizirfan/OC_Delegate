@@ -23,17 +23,19 @@ import { isGitRepo, currentHead } from "./verify.ts";
 import {
   AGENT_NAME,
   OPENCODE_BIN,
-  MODEL_L0,
   MAX_ROUNDS,
   CONCURRENCY_CAP,
   STATE_DIR,
   TRANSCRIPT_DIR,
+  PROBE_TIMEOUT_MS,
+  MODEL_PIN,
 } from "./config.ts";
+import { resolveModelChain, probeChain, loadHealth, pickVariant } from "./models.ts";
 import type { Envelope, TaskClass } from "./types.ts";
 
 // --- tiny hand-rolled arg parser (no deps) ---------------------------------
 
-const BOOLEAN_FLAGS = new Set(["bg", "fresh", "with-diff", "live"]);
+const BOOLEAN_FLAGS = new Set(["bg", "fresh", "with-diff", "live", "probe", "refresh", "all"]);
 
 interface ParsedArgs {
   command: string;
@@ -171,7 +173,7 @@ async function cmdRun(args: ParsedArgs): Promise<void> {
         dir,
         agent: AGENT_NAME,
         class: taskClass,
-        model: envelope.model ?? MODEL_L0,
+        model: envelope.model ?? "",
         initial_task: task,
         created_at: Date.now(),
         last_used_at: Date.now(),
@@ -211,7 +213,11 @@ async function cmdRun(args: ParsedArgs): Promise<void> {
         dir,
         agent: AGENT_NAME,
         class: taskClass,
-        model: MODEL_L0,
+        // Unknown until the background worker resolves the chain and
+        // dispatches; it writes the real model back on completion. Empty (not
+        // a guessed default) so a later `cont` falls through to fresh
+        // discovery rather than resuming on a model that was never used.
+        model: "",
         initial_task: task,
         created_at: Date.now(),
         last_used_at: Date.now(),
@@ -489,6 +495,65 @@ interface DoctorCheck {
   detail: string;
 }
 
+/** `ocd models [--refresh] [--probe] [--all]`
+ *
+ * Shows exactly which model would be chosen and why. This is the inspection
+ * surface for the whole selection mechanism — without it, "we pick the best
+ * free model" is an unfalsifiable claim. `--probe` additionally sends a real
+ * request to candidates and records the result in the health file, which is
+ * the only way to catch a model that advertises itself as active but is
+ * disabled, geo-blocked, or hanging. */
+async function cmdModels(args: ParsedArgs): Promise<void> {
+  const refresh = args.flags["refresh"] === true;
+  const doProbe = args.flags["probe"] === true;
+  const probeAll = args.flags["all"] === true;
+
+  const resolved = await resolveModelChain({ refresh });
+  const health = loadHealth();
+
+  let probeOutcomes: Awaited<ReturnType<typeof probeChain>> | null = null;
+  if (doProbe) {
+    probeOutcomes = await probeChain(resolved.chain, PROBE_TIMEOUT_MS, { all: probeAll });
+  }
+
+  // Re-rank after probing so `selected` reflects what the probes just learned
+  // rather than the stale ordering they were based on.
+  const finalChain = doProbe ? (await resolveModelChain({ refresh: false })).chain : resolved.chain;
+  const usable = finalChain.filter((c) => !c.benched);
+
+  printJSON({
+    ok: usable.length > 0,
+    selected: usable[0]?.model.id ?? null,
+    variant: usable[0] ? (pickVariant(usable[0].model) ?? null) : null,
+    pinned: resolved.pinned,
+    source: resolved.source,
+    fetched_at: new Date(resolved.fetchedAt).toISOString(),
+    warnings: resolved.warnings,
+    candidates: finalChain.map((c) => ({
+      id: c.model.id,
+      score: Number(c.score.toFixed(1)),
+      benched: c.benched,
+      context: c.model.contextLimit,
+      released: c.model.releaseDate,
+      variants: c.model.variants,
+      variant_used: pickVariant(c.model) ?? null,
+      health: health.models[c.model.id]
+        ? {
+            ok: health.models[c.model.id]!.ok,
+            kind: health.models[c.model.id]!.kind,
+            detail: health.models[c.model.id]!.detail,
+            checked: new Date(health.models[c.model.id]!.at).toISOString(),
+          }
+        : null,
+      why: c.reason,
+    })),
+    probe: probeOutcomes
+      ? { healthy: probeOutcomes.healthy, outcomes: probeOutcomes.outcomes }
+      : null,
+  });
+  process.exit(usable.length > 0 ? 0 : 1);
+}
+
 async function cmdDoctor(args: ParsedArgs): Promise<void> {
   const checks: DoctorCheck[] = [];
 
@@ -575,6 +640,49 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
     checks.push({ name: "registry_writable", ok: false, detail: String(err) });
   }
 
+  // Model availability is a first-class health check: every other check can
+  // pass while the tool is completely unusable because the provider retired
+  // the free lineup. Probing (rather than just listing) is what catches a
+  // model that lists as active but is disabled or geo-blocked.
+  let selectedModel: string | undefined;
+  let selectedVariant: string | undefined;
+  try {
+    const resolved = await resolveModelChain({ refresh: args.flags["refresh"] === true });
+    if (resolved.chain.length === 0) {
+      checks.push({
+        name: "model_available",
+        ok: false,
+        detail: `no free tool-calling model found. ${resolved.warnings.join("; ")}`,
+      });
+    } else if (args.flags["live"] === true || args.flags["probe"] === true) {
+      const { healthy, outcomes } = await probeChain(resolved.chain, PROBE_TIMEOUT_MS);
+      selectedModel = healthy ?? undefined;
+      const info = resolved.chain.find((c) => c.model.id === healthy);
+      selectedVariant = info ? pickVariant(info.model) : undefined;
+      const tried = outcomes.map((o) => `${o.model}=${o.ok ? "ok" : (o.kind ?? "fail")}`).join(", ");
+      checks.push({
+        name: "model_available",
+        ok: !!healthy,
+        detail: healthy
+          ? `${healthy}${selectedVariant ? ` (variant ${selectedVariant})` : ""} responded; tried ${tried}`
+          : `no candidate responded; tried ${tried}`,
+      });
+    } else {
+      const usable = resolved.chain.filter((c) => !c.benched);
+      selectedModel = usable[0]?.model.id;
+      selectedVariant = usable[0] ? pickVariant(usable[0].model) : undefined;
+      checks.push({
+        name: "model_available",
+        ok: usable.length > 0,
+        detail: usable.length
+          ? `${usable.length} candidate(s), best=${usable[0]!.model.id} (not probed; use --probe)`
+          : `all ${resolved.chain.length} candidate(s) benched — run \`ocd models --probe\``,
+      });
+    }
+  } catch (err) {
+    checks.push({ name: "model_available", ok: false, detail: String(err) });
+  }
+
   if (args.flags["live"] === true) {
     try {
       ensureStateDirs();
@@ -583,6 +691,10 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
         prompt: "Reply with exactly the word OK and nothing else.",
         taskClass: "analyze",
         transcriptPath: join(TRANSCRIPT_DIR, "_doctor.ndjson"),
+        // Exercise the same model the ladder would actually pick, rather
+        // than whatever opencode defaults to (which may well be paid).
+        model: selectedModel,
+        variant: selectedVariant ?? "",
       });
       const ok = result.rawStatus === "completed" && result.textParts.length > 0;
       checks.push({ name: "live_dispatch", ok, detail: ok ? `round-trip ok in ${result.durationMs}ms` : `rawStatus=${result.rawStatus}` });
@@ -617,6 +729,8 @@ async function main(): Promise<void> {
       return cmdRevert(args);
     case "doctor":
       return cmdDoctor(args);
+    case "models":
+      return cmdModels(args);
     case "_bg-worker": {
       const jobPath = args.positionals[0];
       if (!jobPath) fail("_bg-worker requires a job file path");
@@ -624,7 +738,7 @@ async function main(): Promise<void> {
     }
     default:
       console.error(
-        "usage: ocd <run|cont|poll|result|list|drop|revert|doctor> ...\n" +
+        "usage: ocd <run|cont|poll|result|list|drop|revert|models|doctor> ...\n" +
           '  ocd run --class <read|analyze|edit|test> --dir <abs> --tag <name> [--bg] [--scope a,b] "<task>"\n' +
           '  ocd cont <ref> "<feedback>"\n' +
           "  ocd poll <ref> [--wait <sec>]\n" +
@@ -632,7 +746,8 @@ async function main(): Promise<void> {
           "  ocd list\n" +
           "  ocd drop <ref>\n" +
           "  ocd revert <ref>\n" +
-          "  ocd doctor [--live]",
+          "  ocd models [--refresh] [--probe] [--all]\n" +
+          "  ocd doctor [--live] [--probe] [--refresh]",
       );
       process.exit(1);
   }

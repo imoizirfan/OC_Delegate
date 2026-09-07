@@ -13,7 +13,9 @@ Personal, single-user tool — paths default under `$HOME`, not published to any
 - [Usage](#usage)
 - [The envelope](#the-envelope)
 - [Task classes](#task-classes)
+- [Model selection](#model-selection)
 - [Fallback ladder](#fallback-ladder)
+- [Choosing the model yourself](#choosing-the-model-yourself)
 - [Safety model](#safety-model)
 - [Configuration](#configuration)
 - [Updating](#updating)
@@ -27,7 +29,9 @@ Personal, single-user tool — paths default under `$HOME`, not published to any
 - [Bun](https://bun.sh) ≥ 1.0 — the CLI runs directly as TypeScript, no build step.
 - [opencode](https://opencode.ai) CLI, authenticated against OpenCode Zen (`opencode auth login`) so the free models are reachable.
 - `git`, on `PATH`.
-- macOS or Linux. Built and tested against opencode `1.18.16` and bun `1.3.14`; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against that opencode version specifically and should be re-checked with `ocd doctor` after any opencode upgrade.
+- macOS or Linux. Built and tested against opencode `1.18.20` and bun `1.3.14`; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.20` and should be re-checked with `ocd doctor` after any opencode upgrade.
+
+Model availability is **not** a requirement you need to check by hand — `ocd` discovers free models at runtime and routes around broken ones. See [Model selection](#model-selection).
 
 ## Install
 
@@ -130,10 +134,28 @@ ocd revert <ref>
 
 Undoes an edit-class task's changes: restores files that existed at the recorded base head via `git checkout`, deletes files the task newly created (a plain `checkout` can't restore something with no history), and removes the bookmark branch. Never `git reset --hard`. No-op if the task made no recorded changes; refuses for non-edit refs or refs with no recorded base.
 
+### `ocd models`
+
+```
+ocd models [--refresh] [--probe] [--all]
+```
+
+Shows which model would be chosen and why — the inspection surface for [model selection](#model-selection). Prints the ranked candidate chain with each model's score breakdown, context window, published variants, bench state, and last recorded health result.
+
+| Flag | Effect |
+|---|---|
+| `--refresh` | Re-enumerate from `opencode models --refresh`, bypassing the 6-hour cache. Use after the provider changes its lineup. |
+| `--probe` | Send a real request to candidates and record the outcome in the health file. Stops at the first healthy model. |
+| `--all` | With `--probe`, probe every candidate instead of stopping at the first healthy one. |
+
+Exits `0` if at least one usable model is available, `1` otherwise.
+
+To override which model gets picked, see [Choosing the model yourself](#choosing-the-model-yourself).
+
 ### `ocd doctor`
 
 ```
-ocd doctor [--live]
+ocd doctor [--live] [--probe] [--refresh]
 ```
 
 Health check, run after install and whenever something looks wrong:
@@ -145,7 +167,8 @@ Health check, run after install and whenever something looks wrong:
 | `opencode_zen_auth` | `opencode providers list` shows real credentials. |
 | `agent_permissions` | The `ocd-delegate` agent's **live, resolved** permission rules — not just the source jsonc — actually deny the operations this system depends on for safety (see [Safety model](#safety-model)). Resolved config is a flat rules array with base-then-override entries per `(permission, pattern)`; this check takes the *last* matching entry, since that's the one that actually wins. |
 | `registry_writable` | The state directory can be written to. |
-| `live_dispatch` | Only with `--live`: one real round-trip dispatch (`"Reply with exactly the word OK"`), to confirm the whole path works end-to-end, not just its preconditions. |
+| `model_available` | At least one free, tool-calling model resolves and is not benched. With `--probe` or `--live`, candidates are probed for real rather than trusted from metadata — which is the only way to catch a model that reports itself as active but is disabled, geo-blocked, or hanging. |
+| `live_dispatch` | Only with `--live`: one real round-trip dispatch (`"Reply with exactly the word OK"`) against the model selection actually chose, to confirm the whole path works end-to-end, not just its preconditions. |
 
 ## The envelope
 
@@ -157,7 +180,7 @@ Health check, run after install and whenever something looks wrong:
   "session_id": "ses_abc123",
   "status": "ok",
   "level": 0,
-  "model": "opencode/deepseek-v4-flash-free",
+  "model": "opencode/<whichever-free-model-was-selected>",
   "rounds": 0,
   "text": "Renamed oldName to newName in 3 files.\n\nEVIDENCE: src/a.ts, src/b.ts, src/c.ts",
   "evidence": {
@@ -192,6 +215,9 @@ Health check, run after install and whenever something looks wrong:
 | `rounds` | How many `cont` calls have landed on this ref so far. |
 | `tokens` / `cost` | Usage for this call. `cost` is always `0` — only free models are used. |
 | `transcript` | Path to the full raw NDJSON on disk, for the rare case deeper inspection is needed. |
+| `model_notes` | Present only when non-empty. Non-fatal remarks about *how the model was chosen* (stale cache, a pinned model, an empty lineup). Deliberately separate from `warnings` and excluded from the `next` decision — a discovery note says nothing about whether the work is trustworthy. |
+
+The `model` field records which model actually produced the result. It is **not stable across runs** — see [Model selection](#model-selection).
 
 ### Warnings
 
@@ -216,20 +242,130 @@ Health check, run after install and whenever something looks wrong:
 
 `analyze` deliberately does not require tool calls — `read`/`edit`/`test` are defined by filesystem interaction (you can't read without reading), but forcing the same requirement on `analyze` reproduced a real bug during development: a purely conversational task got `unverified` on every correct answer, burning real calls across the whole fallback ladder chasing a problem that didn't exist.
 
-## Fallback ladder
+## Model selection
 
-Free models only — this system never spends money, it escalates to Claude instead.
+**No model id is hardcoded anywhere.** The provider rotates its free lineup often enough that any written-down id is a scheduled outage. Models are discovered at runtime, filtered, ranked, and health-checked.
+
+Inspect the current decision at any time:
+
+```bash
+ocd models
+```
+
+Selection runs in four stages:
+
+1. **Discover** — `opencode models <provider> --verbose` is parsed for the full catalogue.
+2. **Filter** — a candidate must be *priced at exactly zero* (`cost.input`, `cost.output`, and both cache rates), support **tool calls**, and be marked `active`. Price is read from the metadata, never inferred from the name: the lineup contains a zero-cost model with no `-free` suffix, so name-matching would be wrong in both directions. A model with a missing or partial `cost` block is treated as **paid** — an unknown price is never assumed free.
+3. **Rank** — there is no quality field in the metadata, so the score is derived from what is actually published, weighted for what this tool does: context window (log-scaled, dominant — `ocd` exists to absorb bulk file reading), release recency, reasoning support, and variant support. Every score is shown with its breakdown in `ocd models`.
+4. **Health-gate** — models that recently failed are sunk to the bottom of the chain.
+
+### Why health-gating is not optional
+
+Published metadata does not tell you whether a model works. Of the six models that passed every static filter during testing, **three were unusable**: one disabled server-side, one geo-restricted, and one that accepted requests and never responded. All three reported `status: active`, `toolcall: true`, and a price of zero — and the two *highest-ranked* candidates by metadata score were among them. Ranking alone would confidently pick a dead model every time.
+
+`ocd models --probe` sends a real request to candidates and records the outcome, and `install.sh` runs it once so a fresh install starts warm. Failures are also recorded automatically from real task dispatches, so the chain self-corrects during normal use.
+
+Benched models are **sorted down, never removed**. If every free model is failing, the ladder still has something to attempt, still produces a real error, and still escalates to Claude with evidence — rather than failing before it starts.
+
+| Failure | Classified as | Bench duration |
+|---|---|---|
+| "Model is disabled" | `disabled` | 24h |
+| "not available in your country" | `geo` | 24h |
+| model not found / unknown model | `missing` | 24h |
+| No response within the wall/stall window | `unresponsive` | 15m → 1h → 6h |
+| 429 / rate limit / capacity | `rate_limit` | 15m → 1h → 6h |
+| 401 / unauthorized | `auth` | **never benched** |
+
+`auth` is deliberately exempt: a bad credential is a global problem, and benching each model as it fails would silently empty the entire candidate list over one expired login.
+
+Health tracks **reachability only**. A `blocked` result is permission policy, and `empty` / `unverified` mean the model answered badly — benching on those would evict a working model over a bad prompt and make the health file track quality, which it cannot measure.
+
+### Fallback ladder
+
+Free models only — this system never spends money, it escalates to Claude instead. If discovery yields no free model, `ocd` **fails rather than dispatching**: without an explicit `--model`, opencode would fall back to its own default, which is very likely paid.
 
 | Rung | Model | Advances here when |
 |---|---|---|
-| L0 | `deepseek-v4-flash-free` (`--variant max`) | Starting point for every fresh task. |
-| L1 | same model, same session | L0 came back `empty` / `unverified` / `timeout` / `stalled` / `error` — one retry with a sharpened prompt. |
-| L2 | `nemotron-3-ultra-free` → `mimo-v2.5-free` → `hy3-free`, tried in order | `empty`/`unverified` persisting past L1, or a detected rate-limit. Drops the session — a different model has no shared history — and resends the full task contract. |
+| L0 | Best-ranked healthy model, at its highest published effort variant | Starting point for every fresh task. |
+| L1 | Same model, same session | L0 came back `empty` / `unverified` / `timeout` / `stalled` / `error` — one retry with a sharpened prompt. |
+| L2 | Next-ranked model, walked in order (up to `MAX_ALT_MODELS`) | Failure persisting past L1, or a detected rate-limit. Drops the session — a different model has no shared history — and resends the full task contract. |
 | L3 | — | Ladder gives up. `ocd` returns the last result with `next: escalate` for Claude to take over. |
 
-Exceptions to the table above: a `blocked` result (permission denial) never retries — it escalates immediately, since the policy won't change on retry. A detected auth failure also escalates immediately, regardless of rung. A crash (`error` status) gets one retry at L1 but skips straight to escalate after that, with no L2 detour — unlike `empty`/`unverified`/`timeout`, which walk the full L2 list first.
+Effort variant is resolved **per model** from what that model publishes (`xhigh` → `max` → `high` → `medium` → `low` → `minimal`), and omitted entirely for models that publish none.
+
+Exceptions: a `blocked` result (permission denial) never retries — the policy won't change on a second attempt. A detected auth failure escalates immediately regardless of rung. A repeated `stalled` or `error` moves to a **different model** rather than escalating, because the most common cause in practice is a model that has been disabled or geo-blocked server-side, where retrying the same one is guaranteed to fail.
+
+When the failure is provably structural — the provider says the model is disabled, geo-blocked, or delisted — the ladder **skips the L1 same-model retry entirely** and goes straight to a different model, since retrying is guaranteed to fail identically. Detecting this requires reading opencode's structured error event: under `--format json` a provider failure arrives as an NDJSON event on stdout (leaving stderr empty), so a run that is actually a dead model otherwise looks merely `empty`. That event reports `statusCode: 401` even for a plain model outage, so classification reads its `message` field only — treating the status code as authoritative would misfile a routine model outage as an expired login and escalate instead of switching.
 
 Session continuity (the "chat ID") is model-bound: a session only survives a retry that stays on the same model (L0→L1). The moment the ladder switches models, the old session is dropped and the new one starts from the full initial contract.
+
+### Choosing the model yourself
+
+Automatic selection is the default, not a constraint. There are two ways to override it, and the difference between them is the important part:
+
+| | `OCD_MODEL_PREFER` | `OCD_MODEL` |
+|---|---|---|
+| What it does | Biases the ranking toward models you name | Pins exactly one model |
+| Free-cost + tool-call filter | still applied | **bypassed** |
+| Health-gating | still applied | **bypassed** |
+| Falls back if the model breaks | yes, to the next-best model | no, straight to Claude |
+| Use it for | making a preference stick day to day | debugging one specific model |
+
+Start by getting the exact ids — never type one from memory, since the lineup rotates:
+
+```bash
+ocd models
+```
+
+#### Bias the ranking — `OCD_MODEL_PREFER`
+
+This is the one to reach for. Comma-separated substrings, **highest priority first**, matched against the model id, so a fragment like `mimo` is enough:
+
+```bash
+export OCD_MODEL_PREFER=mimo,ling
+ocd models
+```
+
+A match adds a bonus big enough to be decisive rather than advisory — `+1000` for the first entry, `+900` for the second, and so on, floored at `+100`. That is deliberate: an earlier version added a flat small bonus, and the metadata score (context window, recency) routinely outvoted it, so the documented "highest priority first" ordering quietly didn't hold. You can see the bonus applied in the `why` breakdown:
+
+```
+"why": "ctx=200000(+53.0) age=129d(+9.9) reasoning(+3) prefer[0]:mimo(+1000)"
+```
+
+Everything else still applies: a preferred model must still be free and tool-calling to be a candidate at all, it is still health-gated, and if it breaks mid-task the ladder still walks on to the next-best model. If nothing matches your substrings — most likely because the model was delisted — selection silently falls back to normal ranking, which is the intended behaviour: your preference degrades into "no preference", not into a failure.
+
+Put the `export` in your shell profile to make it permanent.
+
+#### Pin exactly one — `OCD_MODEL`
+
+An escape hatch, honoured verbatim: no discovery, no filtering, no health-gating, no alternates.
+
+```bash
+OCD_MODEL=opencode/<exact-id-from-ocd-models> ocd run --class read --dir "$PWD" --tag probe-one "..."
+```
+
+Prefer setting it per command rather than exporting it — an exported pin disables the entire mechanism that keeps this tool working across a lineup rotation, which is the exact failure this system was built to remove. Two consequences:
+
+- **A pin is the one path that can cost money.** It bypasses the zero-cost filter, so a paid model id will be dispatched to without complaint.
+- **A typo is not caught.** Nothing checks a pinned id against the catalogue, so `ocd models` will report a model that doesn't exist as `selected`, with `ok: true`. Verify a pin with a real request before trusting it:
+
+  ```bash
+  OCD_MODEL=opencode/whatever ocd models --probe
+  ```
+
+  and read `probe.healthy` — `null` means the pinned model never answered. The top-level `ok` only says a pin is set, not that it works.
+
+#### Other levers
+
+| Lever | Effect |
+|---|---|
+| `OCD_MODEL_PROVIDER` | Which provider to enumerate; defaults to `opencode`. Set it to an empty string to enumerate **every** authenticated provider, which widens the candidate pool if you're authed elsewhere. Candidates from other providers still have to pass the free-cost and tool-call filters. |
+| `ocd models --refresh` | Force re-enumeration when the lineup changed and the 6-hour cache hasn't expired yet. |
+| `ocd models --probe --all` | Re-test every candidate now and rewrite the health file, instead of waiting for real dispatches to discover what's broken. |
+| `~/.local/state/ocd/model-health.json` | Delete the file — or just one model's entry — to clear the bench and retry a model immediately instead of waiting out its cooldown. A missing or corrupt file is handled: it's rebuilt empty. |
+| `~/.local/state/ocd/models-cache.json` | Deleting it forces re-discovery on the next call; same effect as `--refresh`. |
+
+There is deliberately **no `--model` flag on `ocd run`**. Model choice is environment-level so that a Claude-driven delegation can't pick one per task — [`skill/SKILL.md`](skill/SKILL.md) instructs Claude not to name a model and not to treat the one in an envelope as stable. Overriding is a decision you make about your machine, not one the orchestrator makes about a task.
 
 ## Safety model
 
@@ -254,20 +390,26 @@ Edit-class tasks add a second, independent layer on top of agent permissions: a 
 
 ## Configuration
 
-Two environment variables, read at startup:
+Environment variables, read at startup:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `OCD_OPENCODE_BIN` | `opencode` (resolved via `PATH`) | Override which `opencode` binary to spawn. |
-| `OCD_STATE_DIR` | `~/.local/state/ocd` | Registry, lock file, and transcripts live here. |
+| `OCD_STATE_DIR` | `~/.local/state/ocd` | Registry, lock file, transcripts, model cache, and health file live here. |
+| `OCD_MODEL_PROVIDER` | `opencode` | Provider to enumerate models from. Empty string enumerates every authenticated provider. |
+| `OCD_MODEL` | *(unset)* | Escape hatch: pin one model id, bypassing discovery **and** health routing. Intended for debugging a specific model. |
+| `OCD_MODEL_PREFER` | *(empty)* | Comma-separated substrings that bias ranking toward specific models, highest priority first. Empty by default, so nothing is favoured by name out of the box. |
+
+The three `OCD_MODEL*` variables are how you override model choice by hand — see [Choosing the model yourself](#choosing-the-model-yourself) for which one to use and what each gives up.
 
 Everything else is a constant in [`src/config.ts`](src/config.ts) — there's no build step, so editing it takes effect on the next invocation:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `MODEL_L0` / `MODEL_L1` | `opencode/deepseek-v4-flash-free` | Model used at ladder rungs 0 and 1. |
-| `MODELS_L2` | `nemotron-3-ultra-free`, `mimo-v2.5-free`, `hy3-free` | Alternate free models, tried in this order at rung 2. |
-| `VARIANT` | `max` | opencode reasoning-effort variant. |
+| `MODELS_CACHE_TTL_MS` | 6 hours | How long the discovered model list is reused before re-enumerating. |
+| `PROBE_TIMEOUT_MS` | `45000` | Wall clock for a single `--probe` health check. |
+| `COOLDOWN_MS` | 15m / 1h / 6h / 24h | Bench durations: escalating for transient failures, 24h for structural ones (`disabled`, `geo`, `missing`). |
+| `MAX_ALT_MODELS` | `3` | Most alternate models the ladder walks before escalating. Bounds worst-case latency — without it, a large discovered lineup could mean many sequential dispatches, each able to burn a full stall window. |
 | `MAX_ROUNDS` | `3` | `cont` calls allowed per ref before forced `escalate`. |
 | `MAX_LADDER` | `4` | Number of rungs (L0..L3). |
 | `CONCURRENCY_CAP` | `4` | Max simultaneous `--bg` dispatches, to stay under free-tier rate limits. |
@@ -324,7 +466,13 @@ git -C /tmp/ocd-smoke/smoke-repo commit -q --allow-empty -m init
 OCD_TEST_SCRATCH=/tmp/ocd-smoke bun test/smoke.ts
 ```
 
-[`test/smoke.ts`](test/smoke.ts) is not a mocked unit-test suite — most checks dispatch real tasks through the real, installed `ocd` (`OCD_TEST_BIN` can override the binary path) against `OCD_TEST_SCRATCH`, so they cost real free-tier calls and take real wall-clock time. Run `ocd doctor` first; a failing precondition there will just show up as confusing test failures. It covers: fault injection against the pure ladder/gate functions (no dispatch), the golden hallucination regression, session continuity across two separate process invocations, an edit-plus-revert round trip, parallel scope-conflict detection, and a context-savings measurement (raw transcript bytes vs. envelope bytes).
+[`test/smoke.ts`](test/smoke.ts) is not a mocked unit-test suite — most checks dispatch real tasks through the real, installed `ocd` (`OCD_TEST_BIN` can override the binary path) against `OCD_TEST_SCRATCH`, so they cost real free-tier calls and take real wall-clock time. Run `ocd doctor` first; a failing precondition there will just show up as confusing test failures. It covers: fault injection against the pure ladder/gate functions (no dispatch), live model selection, the golden hallucination regression, session continuity across two separate process invocations, an edit-plus-revert round trip, parallel scope-conflict detection, and a context-savings measurement (raw transcript bytes vs. envelope bytes).
+
+```bash
+bun test/models.test.ts
+```
+
+[`test/models.test.ts`](test/models.test.ts) covers [model selection](#model-selection) and is fully offline and deterministic — it runs against fixtures captured from real `opencode models --verbose` output and real provider error strings, so it needs no credentials and makes no API calls. It redirects state to a temp dir, so it will not disturb your real registry or health file. Notably it includes a guard that **fails the build if any concrete `provider/model` id appears in `src/`**, which is the mechanism that keeps the no-hardcoding property from quietly regressing.
 
 ## Repo layout
 
@@ -335,18 +483,22 @@ install/merge-config.ts            JSONC-aware config merge, used by install.sh
 config/agent.ocd-delegate.jsonc    opencode agent definition, merged into opencode.jsonc
 skill/SKILL.md                     Claude Code skill, symlinked into ~/.claude/skills/
 src/cli.ts                         CLI entry point and subcommands
-src/config.ts                      tunables — models, timeouts, caps, paths
+src/config.ts                      tunables — timeouts, caps, cooldowns, paths
 src/types.ts                       shared type definitions (Envelope, SessionEntry, ...)
 src/contract.ts                    prompt templates sent to opencode
 src/dispatch.ts                    process spawn, NDJSON streaming, timeouts
+src/models.ts                      model discovery, ranking, health, variants
 src/registry.ts                    session/tag registry, file locking, scope claims
 src/verify.ts                      evidence gate + git diff verification
 src/ladder.ts                      fallback ladder decision logic
 src/envelope.ts                    ladder result -> envelope JSON
-test/smoke.ts                      end-to-end + fault-injection test suite
+test/smoke.ts                      end-to-end + fault-injection test suite (live)
+test/models.test.ts                model-selection test suite (offline)
 ```
 
 ## Known limitations
 
-- **Rate-limit and auth detection is a keyword heuristic**, not verified against a real 401/429 from OpenCode Zen (doing so would require breaking working auth or exhausting the free tier). See `detectErrorHint` in [`src/ladder.ts`](src/ladder.ts).
+- **Rate-limit detection is partly a keyword heuristic.** When opencode emits a structured error event the reason is read from its `message` field directly; otherwise the fallback is a keyword scan of stderr, which has not been verified against a real 429 from OpenCode Zen (doing so would mean deliberately exhausting the free tier). See `detectErrorHint` in [`src/ladder.ts`](src/ladder.ts).
+- **Ranking is a heuristic, because the provider publishes no quality signal.** Context window, recency, and reasoning support are proxies for capability, not measurements of it — a newly listed model could rank first and simply be worse at the work. Health-gating catches models that are *broken*, not models that are merely *bad*. If you find a model that consistently produces better results, bias toward it with `OCD_MODEL_PREFER` rather than editing the scoring.
+- **A model that fails only under load looks healthy to `--probe`.** Probes use a trivial prompt; a model can answer that instantly and still stall on a real task. Such a model gets benched when it actually fails a dispatch, so the system self-corrects — but the first task to hit it pays the timeout. One free model was observed hanging on two probes and then completing normally on a third, which is why `unresponsive` gets a short escalating cooldown rather than the 24-hour structural one.
 - **Ladder position doesn't persist across separate CLI invocations.** If a `cont` resumes a session that had already fallen back to an L2 alternate model, and that `cont` itself needs to retry, it re-walks the L2 list from the start rather than remembering which alternates were already tried. `MAX_ROUNDS` bounds the resulting damage, and this got much less frequent once the evidence gate stopped over-triggering on `analyze` tasks. See the doc comment on `runWithLadder` in [`src/ladder.ts`](src/ladder.ts).

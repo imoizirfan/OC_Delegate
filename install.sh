@@ -52,6 +52,14 @@ case ":$PATH:" in
     ;;
 esac
 
+# Probe the free models once at install time so the health file starts warm.
+# Without this the first real task pays to discover that the top-ranked model
+# is disabled or geo-blocked — the published metadata cannot distinguish a
+# working free model from a dead one, only a live request can.
+echo "==> probing free models (this makes a few short free-tier calls)"
+bun "$REPO_DIR/src/cli.ts" models --refresh --probe >/dev/null 2>&1 || true
+bun "$REPO_DIR/src/cli.ts" models 2>/dev/null | grep -E '"selected"|"variant"' || true
+
 echo "==> running ocd doctor"
 bun "$REPO_DIR/src/cli.ts" doctor || {
   echo "==> doctor reported problems above — install completed, but review them before delegating real work."

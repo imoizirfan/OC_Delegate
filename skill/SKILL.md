@@ -64,9 +64,13 @@ This is capped at a few rounds per tag — `ocd` returns `next: escalate` once t
 
 For a task that takes a while, add `--bg` to get a ref back immediately, then `ocd poll <ref> --wait <sec>` (or come back to it later in the same turn) instead of blocking on it synchronously.
 
-## Fallback
+## Fallback and model choice
 
-`ocd` already retries within a free-model ladder (same model with a sharpened prompt, then alternate free models) before giving up — don't manually retry a failed dispatch. When `status` comes back `error` / `timeout` / `stalled` / `blocked`, `ocd` has already exhausted its own retries (or hit a wall it can't retry past, like a permission denial). The task is now yours to finish, or to re-dispatch with a narrower `--scope` if the failure looks scope-related (e.g. `timeout` on a task that touched too many files at once).
+`ocd` picks its own model. There is no model id hardcoded anywhere and none to pass — it discovers the free, tool-calling models the provider currently offers, ranks them, and routes around ones it has found to be broken. **Don't specify a model, and don't treat a model name in an envelope as stable** — the free lineup rotates, and a model that worked last week may be gone, disabled, or geo-blocked today.
+
+`ocd` already retries within that ladder (same model with a sharpened prompt, then a different free model) before giving up — don't manually retry a failed dispatch. When `status` comes back `error` / `timeout` / `stalled` / `blocked`, `ocd` has already exhausted its own retries (or hit a wall it can't retry past, like a permission denial). The task is now yours to finish, or to re-dispatch with a narrower `--scope` if the failure looks scope-related (e.g. `timeout` on a task that touched too many files at once).
+
+If **every** dispatch is failing rather than just one, that's an environment problem, not a task problem: run `ocd models --probe` to see which free models are actually reachable right now. An envelope may also carry `model_notes` — non-fatal remarks about how the model was chosen (a stale cache, a pinned model, an empty lineup). These say nothing about whether the *work* is trustworthy; that's what `warnings` and `evidence` are for.
 
 ## Destructive ops stay hard-denied
 
