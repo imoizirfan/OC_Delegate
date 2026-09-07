@@ -1,4 +1,4 @@
-import { TEXT_TRUNCATE } from "./config.ts";
+import { TEXT_TRUNCATE, SOURCES_REPORTED_CAP } from "./config.ts";
 import { isPermissionDenial } from "./dispatch.ts";
 import type { LadderRunResult } from "./ladder.ts";
 import type { Envelope, NextAction } from "./types.ts";
@@ -43,6 +43,16 @@ export function buildEnvelope(params: {
   const warnings = [...gate.warnings];
   if (dispatchResult.malformedLines > 0) warnings.push(`malformed_lines:${dispatchResult.malformedLines}`);
 
+  // Trim AFTER the gate has already cross-checked the model's cited URLs
+  // against the full set — trimming first would turn honest citations of
+  // later results into phantom_source_reference warnings.
+  const evidence = { ...gate.evidence };
+  const allSources = evidence.sources ?? [];
+  if (allSources.length > SOURCES_REPORTED_CAP) {
+    evidence.sources = allSources.slice(0, SOURCES_REPORTED_CAP);
+    evidence.sources_truncated = allSources.length;
+  }
+
   return {
     ref,
     session_id: dispatchResult.sessionId,
@@ -51,7 +61,7 @@ export function buildEnvelope(params: {
     model: modelUsed,
     rounds,
     text,
-    evidence: gate.evidence,
+    evidence,
     warnings,
     tokens: dispatchResult.tokens,
     cost: dispatchResult.cost,

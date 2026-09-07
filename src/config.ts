@@ -101,6 +101,16 @@ export const SESSION_TURN_CAP = 40;
 
 export const TEXT_TRUNCATE = 4000;
 export const FILES_SEEN_CAP = 50;
+/** How many `sources` survive into the envelope.
+ *
+ * Much tighter than FILES_SEEN_CAP because a search retrieves far more URLs
+ * than a read touches files: a real 4-call search produced 50 unique URLs,
+ * which was 54% of the entire envelope by bytes — for a tool whose whole
+ * premise is that the envelope stays small. The evidence gate still checks
+ * cited URLs against the COMPLETE set (truncating before the check would
+ * manufacture phantoms); only the reported list is trimmed, and the envelope
+ * says so when it happens. */
+export const SOURCES_REPORTED_CAP = 12;
 
 export const LOCK_STALE_MS = 30_000;
 export const LOCK_RETRY_MS = 100;

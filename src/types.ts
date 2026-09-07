@@ -33,6 +33,9 @@ export interface Evidence {
   sources?: string[];
   /** Search queries actually issued, from real websearch tool inputs. */
   queries?: string[];
+  /** Total number of sources when `sources` was trimmed for the envelope.
+   * Present only when trimming happened; the gate always saw the full set. */
+  sources_truncated?: number;
 }
 
 export interface TokenUsage {

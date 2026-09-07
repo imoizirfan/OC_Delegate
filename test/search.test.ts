@@ -159,6 +159,63 @@ const gate = (toolUses: ToolUseRecord[], finalText: string) =>
   eq("gate:analyze_still_exempt", g.forcedStatus, null);
 }
 
+console.log("\n=== envelope source trimming ===");
+
+{
+  // A real 4-call search produced 50 unique URLs — 54% of the envelope by
+  // bytes, for a tool whose whole premise is that the envelope stays small.
+  // The gate must still see all of them, or honest citations of the later
+  // results would be reported as phantoms.
+  const { buildEnvelope } = await import("../src/envelope.ts");
+  const { SOURCES_REPORTED_CAP } = await import("../src/config.ts");
+
+  const many = Array.from({ length: 40 }, (_, i) => `https://e${i}.dev/p`);
+  const late = many[39]!;
+  const toolUses = [websearch("q", many)];
+  const finalText = `answer.\nEVIDENCE: ${late}`;
+
+  const gate = evaluateGate({ taskClass: "search", finalText, toolUses });
+  eq("trim:gate_sees_all_sources", gate.evidence.sources?.length, 40);
+  eq("trim:late_citation_is_not_a_phantom", gate.warnings, []);
+
+  const env = buildEnvelope({
+    ref: "t",
+    rounds: 0,
+    transcriptPath: "/tmp/t.ndjson",
+    ladderResult: {
+      dispatchResult: {
+        rawStatus: "completed", exitCode: 0, sessionId: "s", textParts: [finalText],
+        toolUses, tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+        cost: 0, durationMs: 1, stderrTail: "", malformedLines: 0, apiError: null,
+      },
+      gate, status: "ok", level: 0, modelUsed: "m", attempts: 1, ladderLog: [], modelWarnings: [],
+    },
+  });
+  eq("trim:envelope_reports_capped_list", env.evidence.sources?.length, SOURCES_REPORTED_CAP);
+  eq("trim:envelope_reports_real_total", env.evidence.sources_truncated, 40);
+  check("trim:envelope_has_no_phantom_warning", env.warnings.length === 0, JSON.stringify(env.warnings));
+}
+
+{
+  // Under the cap, nothing is trimmed and no marker appears.
+  const { buildEnvelope } = await import("../src/envelope.ts");
+  const toolUses = [websearch("q", ["https://a.dev/x"])];
+  const gate = evaluateGate({ taskClass: "search", finalText: "x.\nEVIDENCE: https://a.dev/x", toolUses });
+  const env = buildEnvelope({
+    ref: "t", rounds: 0, transcriptPath: "/tmp/t.ndjson",
+    ladderResult: {
+      dispatchResult: {
+        rawStatus: "completed", exitCode: 0, sessionId: "s", textParts: ["x"],
+        toolUses, tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+        cost: 0, durationMs: 1, stderrTail: "", malformedLines: 0, apiError: null,
+      },
+      gate, status: "ok", level: 0, modelUsed: "m", attempts: 1, ladderLog: [], modelWarnings: [],
+    },
+  });
+  eq("trim:small_list_untouched", env.evidence.sources?.length, 1);
+  check("trim:no_marker_when_untrimmed", env.evidence.sources_truncated === undefined);
+}
+
 console.log("\n=== search contract ===");
 
 {

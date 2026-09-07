@@ -289,7 +289,8 @@ It uses opencode's own native `websearch` tool (Exa-backed) plus `webfetch`, bot
 **`sources` and `queries` are the verified part**, exactly as `files_seen` is for a read task. They are built from real tool calls, not from the model's prose:
 
 - `queries` comes from the `query` field of each real `websearch` call.
-- `sources` is the union of every `webfetch` URL and every http(s) URL found in a web tool's **output** — search results carry their URLs in the result body, not in the input, so without scraping the output an honest search would appear to have retrieved nothing. Only the URLs are kept (capped at 20), never the bodies.
+- `sources` is the union of every `webfetch` URL and every http(s) URL found in a web tool's **output** — search results carry their URLs in the result body, not in the input, so without scraping the output an honest search would appear to have retrieved nothing. Only the URLs are kept, never the bodies.
+- The envelope reports at most 12 sources, with `evidence.sources_truncated` giving the real total when it trimmed. The gate always cross-checks against the **complete** set — trimming before the check would turn an honest citation of the 30th result into a phantom. A real four-call search produced 50 unique URLs, which was 54% of the envelope by bytes; for a tool whose entire premise is that the envelope stays small, that had to be capped.
 
 The gate is stricter for `search` than for any other non-mutating class, because the failure mode is worse — a confidently wrong answer sourced from stale training data looks exactly like a correct one:
 
@@ -656,6 +657,7 @@ Everything else is a constant in [`src/config.ts`](src/config.ts) — there's no
 | `SESSION_TURN_CAP` | `40` | Sessions past this many turns are auto-retired. |
 | `TEXT_TRUNCATE` | `4000` chars | Envelope `text` field truncation. |
 | `FILES_SEEN_CAP` | `50` | Envelope `evidence.files_seen` truncation. |
+| `SOURCES_REPORTED_CAP` | `12` | Envelope `evidence.sources` truncation. The evidence gate still checks against the full, untrimmed set. |
 
 Per-class timeouts (`TIMEOUTS_MS`):
 
