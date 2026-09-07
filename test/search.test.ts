@@ -54,10 +54,22 @@ eq(
 eq("urls:strips_trailing_punctuation", extractResultUrls("go to https://example.org/docs."), ["https://example.org/docs"]);
 eq("urls:dedupes", extractResultUrls("https://a.dev/x https://a.dev/x"), ["https://a.dev/x"]);
 {
-  // Capped so a search returning a wall of links can't bloat the envelope —
-  // this is the exact payload-inflation problem ocd exists to prevent.
-  const many = Array.from({ length: 50 }, (_, i) => `https://e.dev/${i}`).join(" ");
-  check("urls:capped", extractResultUrls(many).length === 20, `${extractResultUrls(many).length}`);
+  // Regression, from a real incident. This cap was 20, a live websearch
+  // returned 33 unique URLs, the model correctly cited the one at index 29,
+  // and the gate accused it of inventing the citation — because the dropped
+  // URL never made it into ground truth. The bound here exists to stop
+  // unbounded memory growth, NOT to keep the envelope small (that is
+  // SOURCES_REPORTED_CAP's job, applied after the gate has run). It must
+  // therefore stay well clear of anything a real search produces.
+  const realistic = Array.from({ length: 33 }, (_, i) => `https://e.dev/${i}`).join(" ");
+  eq("urls:realistic_search_output_not_truncated", extractResultUrls(realistic).length, 33);
+  check(
+    "urls:url_past_old_cap_survives",
+    extractResultUrls(realistic).includes("https://e.dev/29"),
+  );
+
+  const absurd = Array.from({ length: 900 }, (_, i) => `https://e.dev/${i}`).join(" ");
+  check("urls:still_bounded", extractResultUrls(absurd).length === 500, `${extractResultUrls(absurd).length}`);
 }
 
 console.log("\n=== evidence assembly ===");

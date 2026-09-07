@@ -44,7 +44,22 @@ export interface ToolUseRecord {
  * rather than "any tool with URLs in its output" — a grep across a repo full
  * of links would otherwise manufacture sources the model never retrieved. */
 const WEB_TOOLS = new Set(["websearch", "webfetch"]);
-const MAX_RESULT_URLS = 20;
+
+/** Sanity bound on URLs pulled from one tool call — NOT a display cap.
+ *
+ * This number must stay well clear of anything a real search produces,
+ * because the evidence gate treats this list as ground truth: a URL dropped
+ * here becomes a URL the model is accused of inventing. That is not
+ * hypothetical. At 20 this fired for real — a websearch returned 33 unique
+ * URLs, the model correctly cited the one at index 29, and the gate reported
+ * `phantom_source_reference` against a citation that was perfectly honest.
+ *
+ * Envelope size is handled separately and later, by SOURCES_REPORTED_CAP in
+ * envelope.ts, which trims only what is REPORTED and only after the gate has
+ * checked against the full set. Keeping the two caps apart is the whole
+ * point: one bounds memory, the other bounds output, and neither gets to
+ * decide whether the model told the truth. */
+const MAX_RESULT_URLS = 500;
 
 export function extractResultUrls(output: string | undefined): string[] {
   if (!output) return [];
