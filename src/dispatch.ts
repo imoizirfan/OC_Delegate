@@ -27,6 +27,33 @@ export interface ToolUseRecord {
   input: unknown;
   status: "completed" | "error" | "pending" | "running";
   error?: string;
+  /** http(s) URLs appearing in a web tool's OUTPUT.
+   *
+   * Needed because only `webfetch` carries its URL in its input; `websearch`
+   * takes `{ query }` and returns the URLs in its result body. Without this, a
+   * task that searched but did not fetch would have zero recorded sources, and
+   * the evidence gate would flag every correctly-cited URL as a phantom.
+   *
+   * ONLY the URLs are kept, capped — never the body. Dragging raw tool output
+   * around is the exact thing ocd exists to avoid, and a search result body is
+   * also attacker-controlled text that has no business near the envelope. */
+  resultUrls?: string[];
+}
+
+/** Tools whose output is scanned for source URLs. Deliberately a fixed list
+ * rather than "any tool with URLs in its output" — a grep across a repo full
+ * of links would otherwise manufacture sources the model never retrieved. */
+const WEB_TOOLS = new Set(["websearch", "webfetch"]);
+const MAX_RESULT_URLS = 20;
+
+export function extractResultUrls(output: string | undefined): string[] {
+  if (!output) return [];
+  const out = new Set<string>();
+  for (const m of output.matchAll(/https?:\/\/[^\s"'<>)\]}\\]+/gi)) {
+    out.add(m[0].replace(/[.,;:!?]+$/, ""));
+    if (out.size >= MAX_RESULT_URLS) break;
+  }
+  return [...out];
 }
 
 /** A provider-level failure reported by opencode itself.
@@ -192,11 +219,13 @@ export async function dispatch(opts: DispatchOptions): Promise<DispatchResult> {
     if (part.type === "text" && typeof part.text === "string") {
       textParts.push(part.text);
     } else if (part.type === "tool" && part.tool) {
+      const resultUrls = WEB_TOOLS.has(part.tool) ? extractResultUrls(part.state?.output) : [];
       toolUses.push({
         tool: part.tool,
         input: part.state?.input,
         status: (part.state?.status as ToolUseRecord["status"]) ?? "pending",
         error: part.state?.error,
+        ...(resultUrls.length ? { resultUrls } : {}),
       });
     } else if (part.type === "step-finish" && part.tokens) {
       tokens = {

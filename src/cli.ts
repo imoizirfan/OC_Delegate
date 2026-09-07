@@ -88,7 +88,7 @@ function fail(message: string, extra?: Record<string, unknown>): never {
   throw new Error("unreachable");
 }
 
-const TASK_CLASSES = ["read", "analyze", "edit", "test"] as const;
+const TASK_CLASSES = ["read", "analyze", "edit", "test", "search"] as const;
 function isTaskClass(v: unknown): v is TaskClass {
   return typeof v === "string" && (TASK_CLASSES as readonly string[]).includes(v);
 }
@@ -110,7 +110,7 @@ async function cmdRun(args: ParsedArgs): Promise<void> {
   const scopeRaw = strFlag(args, "scope");
   const bg = args.flags["bg"] === true;
 
-  if (!isTaskClass(classFlag)) fail("`--class` must be one of read|analyze|edit|test");
+  if (!isTaskClass(classFlag)) fail("`--class` must be one of read|analyze|edit|test|search");
   if (!dir || !dir.startsWith("/")) fail("`--dir` is required and must be an absolute path");
   if (!existsSync(dir)) fail(`--dir does not exist: ${dir}`);
   if (!tag) fail("`--tag` is required (used as the ref for later ocd cont/poll/result calls)");
@@ -327,7 +327,7 @@ async function cmdCont(args: ParsedArgs): Promise<void> {
     process.exit(1);
   }
 
-  const continuationPrompt = buildContinuationPrompt(feedback);
+  const continuationPrompt = buildContinuationPrompt(feedback, entry.class);
   // Used only if the ladder must fall back to a fresh session on an alt
   // model — that session has no history, so it needs the real original
   // task, not just the follow-up feedback, to have a chance of a sane result.
@@ -651,7 +651,25 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
     if (code !== 0) {
       checks.push({ name: "agent_permissions", ok: false, detail: `'${AGENT_NAME}' agent not found — run install.sh first (${out.slice(0, 200)})` });
     } else {
-      const parsed = JSON.parse(out) as { permission?: { permission: string; pattern: string; action: string }[] };
+      const parsed = JSON.parse(out) as {
+        permission?: { permission: string; pattern: string; action: string }[];
+        model?: { providerID?: string; modelID?: string };
+      };
+
+      // An agent-level model is how this tool broke before: the installed
+      // config pinned an id, the provider delisted it, and nothing noticed.
+      // ocd always passes --model explicitly, so the correct value here is
+      // "none" — anything else is a stale install carrying a rotting id.
+      const agentModel = parsed.model?.modelID
+        ? `${parsed.model.providerID ?? "?"}/${parsed.model.modelID}`
+        : null;
+      checks.push({
+        name: "agent_has_no_pinned_model",
+        ok: agentModel === null,
+        detail: agentModel
+          ? `'${AGENT_NAME}' pins model '${agentModel}' — a stale install. Re-run install.sh; ocd resolves models at runtime and this id will rot.`
+          : "no agent-level model pinned (correct — ocd passes --model per dispatch)",
+      });
       const rules = parsed.permission ?? [];
       // These are exactly the rules this system depends on for safety —
       // re-asserted against the LIVE resolved config every run rather than
@@ -670,20 +688,41 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
         ["bash", "npm publish*"],
         ["external_directory", "*"],
         ["doom_loop", "*"],
-        ["webfetch", "*"],
       ];
+      // `webfetch` used to be on the deny list; it is now required to be
+      // ALLOWED, because `--class search` is unusable without it. Asserted
+      // positively rather than simply dropped, so a teammate whose merged
+      // config silently loses these gets a failing doctor telling them why
+      // search returns `blocked`, instead of a mystery.
+      const expectedAllow: [string, string][] = [
+        ["webfetch", "*"],
+        ["websearch", "*"],
+      ];
+      const resolveAction = (perm: string, pattern: string): string | undefined =>
+        rules.filter((r) => r.permission === perm && r.pattern === pattern).at(-1)?.action;
+
       const mismatches: string[] = [];
       for (const [perm, pattern] of expectedDeny) {
-        const matches = rules.filter((r) => r.permission === perm && r.pattern === pattern);
-        const resolved = matches.at(-1);
-        if (!resolved || resolved.action !== "deny") {
-          mismatches.push(`${perm}:${pattern} resolved to '${resolved?.action ?? "MISSING"}', expected 'deny'`);
+        const action = resolveAction(perm, pattern);
+        if (action !== "deny") {
+          mismatches.push(`${perm}:${pattern} resolved to '${action ?? "MISSING"}', expected 'deny'`);
+        }
+      }
+      for (const [perm, pattern] of expectedAllow) {
+        const action = resolveAction(perm, pattern);
+        if (action !== "allow") {
+          mismatches.push(
+            `${perm}:${pattern} resolved to '${action ?? "MISSING"}', expected 'allow' (--class search needs it)`,
+          );
         }
       }
       checks.push({
         name: "agent_permissions",
         ok: mismatches.length === 0,
-        detail: mismatches.length === 0 ? "all expected deny-rules confirmed in resolved config" : mismatches.join("; "),
+        detail:
+          mismatches.length === 0
+            ? `${expectedDeny.length} deny-rules and ${expectedAllow.length} allow-rules confirmed in resolved config`
+            : mismatches.join("; "),
       });
     }
   } catch (err) {
@@ -799,7 +838,7 @@ async function main(): Promise<void> {
     default:
       console.error(
         "usage: ocd <run|cont|poll|result|list|drop|revert|models|doctor> ...\n" +
-          '  ocd run --class <read|analyze|edit|test> --dir <abs> --tag <name> [--bg] [--scope a,b] "<task>"\n' +
+          '  ocd run --class <read|analyze|edit|test|search> --dir <abs> --tag <name> [--bg] [--scope a,b] "<task>"\n' +
           '  ocd cont <ref> "<feedback>"\n' +
           "  ocd poll <ref> [--wait <sec>]\n" +
           "  ocd result <ref> [--with-diff]\n" +

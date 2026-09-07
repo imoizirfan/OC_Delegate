@@ -71,6 +71,10 @@ export const COOLDOWN_MS = {
 
 export const TIMEOUTS_MS: Record<TaskClass, { wall: number; stall: number }> = {
   analyze: { wall: 120_000, stall: 45_000 },
+  // Research is network-bound, not compute-bound: several search round trips
+  // plus page fetches. Wider than analyze, but nowhere near the edit class —
+  // a search that has gone quiet for 90s is stuck, not thinking.
+  search: { wall: 300_000, stall: 90_000 },
   read: { wall: 600_000, stall: 90_000 },
   edit: { wall: 900_000, stall: 120_000 },
   test: { wall: 900_000, stall: 120_000 },

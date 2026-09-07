@@ -1,4 +1,4 @@
-export type TaskClass = "read" | "analyze" | "edit" | "test";
+export type TaskClass = "read" | "analyze" | "edit" | "test" | "search";
 
 export type Status =
   | "ok"
@@ -25,6 +25,14 @@ export interface Evidence {
   tools: string[];
   files_seen: string[];
   git?: GitEvidence;
+  /** URLs the model actually fetched, from real webfetch tool inputs. The
+   * web-side counterpart to files_seen, and the only verified part of a
+   * search result — kept separate from files_seen so the phantom-reference
+   * check never compares a URL against a filesystem path. Omitted when
+   * empty, so non-search envelopes are unchanged. */
+  sources?: string[];
+  /** Search queries actually issued, from real websearch tool inputs. */
+  queries?: string[];
 }
 
 export interface TokenUsage {

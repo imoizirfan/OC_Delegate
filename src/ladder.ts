@@ -355,7 +355,7 @@ export async function runWithLadder(opts: LadderRunOptions): Promise<LadderRunRe
     if (attempts === 1) {
       prompt = opts.continuationPrompt ?? opts.initialPrompt;
     } else if (sessionId) {
-      prompt = buildSharpenedRetryPrompt(lastReason);
+      prompt = buildSharpenedRetryPrompt(lastReason, opts.taskClass);
     } else {
       prompt = opts.initialPrompt;
     }

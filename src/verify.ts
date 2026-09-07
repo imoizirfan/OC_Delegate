@@ -73,17 +73,47 @@ function extractPathsFromInput(input: unknown): string[] {
   return paths;
 }
 
+/** URL out of a webfetch tool input.
+ *
+ * Field names are read off opencode's own tool definitions, not guessed:
+ * `webfetch` takes `{ url }` and `websearch` takes
+ * `{ query, type?, numResults?, livecrawl?, contextMaxCharacters? }`.
+ * Filtered to http(s) so a `url` field on some unrelated future tool (a
+ * file:// path, an MCP resource id) can't be mistaken for a fetched page. */
+function extractUrlFromInput(input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const url = (input as Record<string, unknown>)["url"];
+  return typeof url === "string" && /^https?:\/\//i.test(url) ? [url] : [];
+}
+
+function extractQueryFromInput(input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const q = (input as Record<string, unknown>)["query"];
+  return typeof q === "string" && q.trim() ? [q.trim()] : [];
+}
+
 export function buildEvidence(toolUses: ToolUseRecord[]): Omit<Evidence, "git"> {
   const tools = new Set<string>();
   const files = new Set<string>();
+  const sources = new Set<string>();
+  const queries = new Set<string>();
   for (const tu of toolUses) {
     tools.add(tu.tool);
     for (const p of extractPathsFromInput(tu.input)) files.add(p);
+    for (const u of extractUrlFromInput(tu.input)) sources.add(u);
+    // websearch reports its URLs in the result body, not the input — see
+    // ToolUseRecord.resultUrls in dispatch.ts.
+    for (const u of tu.resultUrls ?? []) sources.add(u);
+    for (const q of extractQueryFromInput(tu.input)) queries.add(q);
   }
   return {
     tool_calls: toolUses.length,
     tools: [...tools],
     files_seen: [...files].slice(0, FILES_SEEN_CAP),
+    // Omitted entirely when empty so non-search envelopes keep their exact
+    // previous shape — anything already parsing an envelope stays valid.
+    ...(sources.size ? { sources: [...sources].slice(0, FILES_SEEN_CAP) } : {}),
+    ...(queries.size ? { queries: [...queries].slice(0, FILES_SEEN_CAP) } : {}),
   };
 }
 
@@ -117,6 +147,38 @@ function isReferenced(claimed: string, actualFiles: string[]): boolean {
  * case, just partial instead of total. */
 export function findPhantomReferences(claimed: string[], actualFiles: string[]): string[] {
   return claimed.filter((c) => !isReferenced(c, actualFiles));
+}
+
+/** URL equivalent of isReferenced.
+ *
+ * Deliberately NOT isReferenced: that matches on trailing path segments, so
+ * two unrelated sites both serving `/docs/index.html` would be treated as the
+ * same source. Host must match exactly; path is compared as a prefix so a
+ * model citing `https://x.dev/docs` after fetching `https://x.dev/docs/api`
+ * is not called a liar over a truncation. Anything unparseable falls back to
+ * plain string comparison rather than being silently accepted. */
+function isUrlReferenced(claimed: string, actualUrls: string[]): boolean {
+  const norm = (u: string) => {
+    try {
+      const parsed = new URL(u.trim().replace(/[.,;)\]]+$/, ""));
+      return { host: parsed.host.toLowerCase().replace(/^www\./, ""), path: parsed.pathname.replace(/\/+$/, "") };
+    } catch {
+      return null;
+    }
+  };
+  const c = norm(claimed);
+  if (!c) return actualUrls.some((a) => a.trim() === claimed.trim());
+  return actualUrls.some((a) => {
+    const x = norm(a);
+    if (!x || x.host !== c.host) return false;
+    return x.path.startsWith(c.path) || c.path.startsWith(x.path);
+  });
+}
+
+/** URLs the model cited that it never actually retrieved. Same contract as
+ * findPhantomReferences, for the search class. */
+export function findPhantomSources(claimed: string[], actualUrls: string[]): string[] {
+  return claimed.filter((c) => !isUrlReferenced(c, actualUrls));
 }
 
 export interface GateInput {
@@ -172,20 +234,48 @@ export function evaluateGate(input: GateInput): GateResult {
   // problem that didn't exist. analyze tasks that DO reference the
   // filesystem are still protected by the phantom-reference cross-check
   // below, which isn't gated by taskClass.
-  const requiresTools = input.taskClass === "read" || input.taskClass === "edit" || input.taskClass === "test";
+  // "search" joins read/edit/test rather than analyze: a research task that
+  // produced zero tool calls answered from the model's stale training data,
+  // which is the precise failure the class exists to prevent. Unlike analyze,
+  // there is no legitimate zero-tool-call search.
+  const requiresTools =
+    input.taskClass === "read" ||
+    input.taskClass === "edit" ||
+    input.taskClass === "test" ||
+    input.taskClass === "search";
   if (requiresTools && evidenceBase.tool_calls === 0) {
     warnings.push("no_tool_calls");
     forcedStatus = "unverified";
+  }
+
+  // A search that only ran local tools (grep, read) never touched the web,
+  // so it cannot have current facts — tool_calls > 0 is not enough here.
+  if (input.taskClass === "search") {
+    const usedWeb = evidenceBase.tools.some((t) => t === "websearch" || t === "webfetch");
+    if (evidenceBase.tool_calls > 0 && !usedWeb) {
+      warnings.push("no_web_tool_calls");
+      forcedStatus = "unverified";
+    }
   }
 
   const claimed = parseEvidenceTrailer(input.finalText);
   if (claimed === null) {
     warnings.push("missing_evidence_trailer");
   } else if (claimed.length > 0) {
-    const phantoms = findPhantomReferences(claimed, evidenceBase.files_seen);
-    if (phantoms.length > 0) {
-      warnings.push(`phantom_file_reference:${phantoms.join("|")}`);
-      if (phantoms.length === claimed.length) forcedStatus = "unverified";
+    // Search cites URLs; every other class cites file paths. Comparing one
+    // against the other would flag every honest search as a hallucination.
+    if (input.taskClass === "search") {
+      const phantoms = findPhantomSources(claimed, evidenceBase.sources ?? []);
+      if (phantoms.length > 0) {
+        warnings.push(`phantom_source_reference:${phantoms.join("|")}`);
+        if (phantoms.length === claimed.length) forcedStatus = "unverified";
+      }
+    } else {
+      const phantoms = findPhantomReferences(claimed, evidenceBase.files_seen);
+      if (phantoms.length > 0) {
+        warnings.push(`phantom_file_reference:${phantoms.join("|")}`);
+        if (phantoms.length === claimed.length) forcedStatus = "unverified";
+      }
     }
   }
 
