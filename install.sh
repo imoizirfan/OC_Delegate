@@ -4,6 +4,27 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TS="$(date +%Y%m%d-%H%M%S)"
 
+# Editor hooks are OPT-IN. Without --with-hooks this script touches nothing
+# outside opencode's config, ~/.claude/skills, and ~/.local/bin — writing into
+# somebody's Claude Code / Cursor / Codex config as a side effect of installing
+# a CLI is not a reasonable default, however convenient.
+WITH_HOOKS=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-hooks) WITH_HOOKS=1 ;;
+    -h|--help)
+      echo "usage: ./install.sh [--with-hooks]"
+      echo "  --with-hooks   also wire the ocd-guard pre-read hook into any of"
+      echo "                 Claude Code / Cursor / Codex found on this machine"
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $arg (try --help)" >&2
+      exit 1
+      ;;
+  esac
+done
+
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_CONFIG="$OPENCODE_CONFIG_DIR/opencode.jsonc"
 SKILL_DIR="$HOME/.claude/skills/opencode-delegate"
@@ -41,6 +62,39 @@ echo "==> symlinking ocd onto PATH"
 rm -f "$BIN_DIR/ocd"
 ln -s "$REPO_DIR/bin/ocd" "$BIN_DIR/ocd"
 echo "    symlinked $BIN_DIR/ocd -> $REPO_DIR/bin/ocd"
+rm -f "$BIN_DIR/ocd-guard"
+ln -s "$REPO_DIR/bin/ocd-guard" "$BIN_DIR/ocd-guard"
+echo "    symlinked $BIN_DIR/ocd-guard -> $REPO_DIR/bin/ocd-guard"
+
+# --- optional: editor hooks -------------------------------------------------
+#
+# The guard makes delegation automatic rather than dependent on the agent
+# choosing to read the skill file: it blocks oversized direct file reads and
+# hands back the `ocd run` command to use instead. Every host is wired only if
+# its config directory already exists, and every file is backed up first.
+if [ "$WITH_HOOKS" = "1" ]; then
+  echo "==> wiring ocd-guard hook (--with-hooks)"
+  GUARD_BIN="$BIN_DIR/ocd-guard"
+  wire_hook() {
+    local host="$1" cfg="$2" dir
+    dir="$(dirname "$cfg")"
+    if [ ! -d "$dir" ]; then
+      echo "    skipped $host — $dir not present"
+      return 0
+    fi
+    if [ -f "$cfg" ]; then
+      cp "$cfg" "$cfg.bak-$TS"
+      echo "    backed up $cfg to $cfg.bak-$TS"
+    fi
+    bun "$REPO_DIR/install/merge-hooks.ts" "$host" "$cfg" "$GUARD_BIN" | sed 's/^/    /'
+  }
+  wire_hook claude "$HOME/.claude/settings.json"
+  wire_hook cursor "$HOME/.cursor/hooks.json"
+  wire_hook codex  "$HOME/.codex/hooks.json"
+  echo "    (disable per-session with OCD_GUARD_DISABLE=1; tune with OCD_GUARD_MAX_BYTES)"
+else
+  echo "==> skipping editor hooks (re-run with --with-hooks to wire ocd-guard into Claude Code / Cursor / Codex)"
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*)

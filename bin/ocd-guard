@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# install.sh symlinks this file onto PATH and wires it into
+# ~/.claude/settings.json as a PreToolUse hook, so BASH_SOURCE must be
+# resolved through the symlink to find src/guard.ts — see bin/ocd for why
+# this doesn't just use `readlink -f` (no GNU coreutils on macOS).
+resolve_path() {
+  local target="$1"
+  while [ -L "$target" ]; do
+    local link
+    link="$(readlink "$target")"
+    if [[ "$link" == /* ]]; then
+      target="$link"
+    else
+      target="$(dirname "$target")/$link"
+    fi
+  done
+  echo "$target"
+}
+
+SELF="$(resolve_path "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+exec bun "$SCRIPT_DIR/../src/guard.ts"
