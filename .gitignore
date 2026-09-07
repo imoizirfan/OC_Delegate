@@ -8,3 +8,8 @@ state/
 
 # harness-internal state, not project source
 .claude/
+
+# Presentation material — internal speaker notes, unaudited metrics and
+# framing that has no business in a public clone. Kept in the working tree
+# so it lives alongside the thing it describes, deliberately never committed.
+presentation/

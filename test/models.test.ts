@@ -648,6 +648,67 @@ console.log("\n=== no hardcoded model ids anywhere in the repo ===");
   );
 }
 
+console.log("\n=== dependency surface: opencode, git, bun — nothing else ===");
+
+{
+  // "It only needs opencode" is a promise the README makes, so it gets a
+  // build-failing test rather than a good intention. A fourth binary or a
+  // second model provider changes what this tool IS; it should not be
+  // possible to add one without this going red and someone deciding on
+  // purpose. Same reasoning as the no-hardcoded-model-ids guard above.
+  const srcDir = join(import.meta.dir, "..", "src");
+  const installDir = join(import.meta.dir, "..", "install");
+
+  // First element of every `cmd: [...]` — either a string literal or the
+  // OPENCODE_BIN constant (which is `opencode`, overridable per machine via
+  // OCD_OPENCODE_BIN but never pointing at a different tool).
+  const ALLOWED = new Set(["OPENCODE_BIN", "git", "bun"]);
+  const spawned = new Set<string>();
+  const offenders: string[] = [];
+
+  for (const dir of [srcDir, installDir]) {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".ts")) continue;
+      const code = readFileSync(join(dir, f), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      for (const m of code.matchAll(/cmd:\s*\[\s*(?:"([^"]+)"|([A-Za-z_$][\w$]*))/g)) {
+        const bin = m[1] ?? m[2]!;
+        spawned.add(bin);
+        if (!ALLOWED.has(bin)) offenders.push(`${f}: spawns '${bin}'`);
+      }
+    }
+  }
+
+  check("deps:no_unexpected_binaries", offenders.length === 0, offenders.length ? offenders.join(" | ") : `spawns only ${[...spawned].sort().join(", ")}`);
+  check("deps:actually_scanned_something", spawned.size >= 3, `found ${spawned.size} distinct binaries`);
+
+  // No research CLI, no second provider, by name — these are the things a
+  // well-meaning future change would most plausibly reach for.
+  const banned = /\b(gres|gemini|openai|anthropic|claude|curl|wget|ollama)\b/i;
+  const named: string[] = [];
+  for (const dir of [srcDir, installDir]) {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".ts")) continue;
+      const code = readFileSync(join(dir, f), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      for (const m of code.matchAll(/cmd:\s*\[[^\]]*\]/g)) {
+        if (banned.test(m[0])) named.push(`${f}: ${m[0].slice(0, 60)}`);
+      }
+    }
+  }
+  check("deps:no_second_provider_or_research_cli", named.length === 0, named.length ? named.join(" | ") : "none");
+
+  // A runtime npm dependency would be a fourth thing to install and keep
+  // current; the tool runs as TypeScript with no build step precisely so
+  // there is nothing to resolve at install time but bun itself.
+  const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+  };
+  eq("deps:no_runtime_npm_dependencies", Object.keys(pkg.dependencies ?? {}), []);
+}
+
 // --- summary ---------------------------------------------------------------
 
 rmSync(TMP, { recursive: true, force: true });
