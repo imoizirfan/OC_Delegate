@@ -1,14 +1,17 @@
 {
   "name": "ocd",
-  "version": "0.1.0",
-  "description": "Deterministic wrapper CLI that lets Claude Code delegate subtasks to opencode (DeepSeek V4 Flash free) with session continuity, an evidence gate against hallucination, git-verified edits, and a free-model fallback ladder.",
+  "version": "0.2.0",
+  "description": "Deterministic wrapper CLI that lets a coding agent delegate mechanical, context-heavy subtasks — including web research — to opencode on a runtime-discovered free model, with session continuity, an evidence gate against hallucination, git-verified edits, and a health-gated model fallback ladder.",
   "private": true,
   "type": "module",
   "bin": {
     "ocd": "./bin/ocd"
   },
   "scripts": {
-    "test": "bun test/smoke.ts"
+    "test": "bun test/models.test.ts && bun test/search.test.ts && bun test/guard.test.ts",
+    "test:offline": "bun test/models.test.ts && bun test/search.test.ts && bun test/guard.test.ts",
+    "test:live": "bun test/smoke.ts",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "bun": ">=1.0.0"

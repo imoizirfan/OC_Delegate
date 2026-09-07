@@ -1,10 +1,12 @@
 # OC_Delegate
 
-`ocd` is a deterministic wrapper CLI that lets Claude Code delegate mechanical, context-heavy subtasks to [opencode](https://opencode.ai) running a free model, instead of spending Claude usage on bulk work. Claude only ever reads a small, fixed-shape JSON envelope — never opencode's raw output.
+`ocd` is a deterministic wrapper CLI that lets a coding agent — Claude Code, Cursor, Codex, or anything else with shell access — delegate mechanical, context-heavy subtasks to [opencode](https://opencode.ai) running a free model, instead of spending its own usage on bulk work. The calling agent only ever reads a small, fixed-shape JSON envelope — never opencode's raw output.
+
+That covers bulk file reading, mechanical edits, running tests, and (since v0.2.0) **web research**: `--class search` replaces the calling agent's own web search with the free model's, under the same evidence gate. A [pre-read hook](#editor-integration) makes delegation automatic rather than a judgment call the model has to remember to make.
 
 It exists because a bare `opencode run` has three problems that make it unsafe to hand raw output to Claude: `--format json` inflates content instead of compressing it, the free model will confidently hallucinate filesystem facts with zero tool calls behind them, and the exit code is `0` even when a task was denied by policy. `ocd` fixes all three: it strips tool payloads down to a compact envelope, runs an evidence gate that never trusts the model's prose, and derives status from the real event stream.
 
-Personal, single-user tool — paths default under `$HOME`, not published to any package registry.
+Single-user tool — paths default under `$HOME`, not published to any package registry. Installed per machine from this repo.
 
 ## Contents
 
@@ -13,10 +15,12 @@ Personal, single-user tool — paths default under `$HOME`, not published to any
 - [Usage](#usage)
 - [The envelope](#the-envelope)
 - [Task classes](#task-classes)
+- [Web search](#web-search)
 - [Model selection](#model-selection)
 - [Fallback ladder](#fallback-ladder)
 - [Choosing the model yourself](#choosing-the-model-yourself)
 - [Safety model](#safety-model)
+- [Editor integration](#editor-integration)
 - [Configuration](#configuration)
 - [Updating](#updating)
 - [Uninstalling](#uninstalling)
@@ -29,7 +33,8 @@ Personal, single-user tool — paths default under `$HOME`, not published to any
 - [Bun](https://bun.sh) ≥ 1.0 — the CLI runs directly as TypeScript, no build step.
 - [opencode](https://opencode.ai) CLI, authenticated against OpenCode Zen (`opencode auth login`) so the free models are reachable.
 - `git`, on `PATH`.
-- macOS or Linux. Built and tested against opencode `1.18.20` and bun `1.3.14`; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.20` and should be re-checked with `ocd doctor` after any opencode upgrade.
+- macOS or Linux. Built and tested against opencode `1.18.29` and bun `1.3.14`; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.29` and should be re-checked with `ocd doctor` after any opencode upgrade.
+- Optional, for [editor integration](#editor-integration): Claude Code, Cursor, or Codex CLI ≥ `0.114` (hooks are stable and on by default as of `0.141`).
 
 Model availability is **not** a requirement you need to check by hand — `ocd` discovers free models at runtime and routes around broken ones. See [Model selection](#model-selection).
 
@@ -47,8 +52,15 @@ cd ~/OC_Delegate
 2. Creates `~/.local/state/ocd/{transcripts,jobs}`.
 3. Backs up `~/.config/opencode/opencode.jsonc` (if present) to `opencode.jsonc.bak-<timestamp>`, then merges the `ocd-delegate` agent definition from [`config/agent.ocd-delegate.jsonc`](config/agent.ocd-delegate.jsonc) into it. Every other key in that file — including a pre-existing `delegate` agent, MCP servers, etc. — is left untouched.
 4. Symlinks [`skill/SKILL.md`](skill/SKILL.md) to `~/.claude/skills/opencode-delegate/SKILL.md` (backing up a real file there first, if one exists and isn't already a symlink).
-5. Symlinks `bin/ocd` to `~/.local/bin/ocd` and warns if `~/.local/bin` isn't on `PATH`.
-6. Runs `ocd doctor` and fails the install (non-zero exit) if any check fails.
+5. Symlinks `bin/ocd` and `bin/ocd-guard` to `~/.local/bin/` and warns if `~/.local/bin` isn't on `PATH`.
+6. Probes the free models once so the health file starts warm — without this, the first real task pays to discover that the top-ranked model is disabled or geo-blocked.
+7. Runs `ocd doctor` and fails the install (non-zero exit) if any check fails.
+
+Pass `--with-hooks` to also wire the pre-read hook into Claude Code, Cursor and Codex — see [Editor integration](#editor-integration). Without that flag, nothing outside opencode's config, `~/.claude/skills/`, and `~/.local/bin/` is touched.
+
+```bash
+./install.sh --with-hooks
+```
 
 If `ocd doctor` fails at the end, fix whatever it flagged (see [`ocd doctor`](#ocd-doctor)) before delegating real work — the install itself will have still completed.
 
@@ -73,14 +85,14 @@ ocd revert rename-vars
 ### `ocd run`
 
 ```
-ocd run --class <read|analyze|edit|test> --dir <abs-path> --tag <name> [--bg] [--scope a,b] "<task>"
+ocd run --class <read|analyze|edit|test|search> --dir <abs-path> --tag <name> [--bg] [--scope a,b] "<task>"
 ```
 
 Dispatches a new task under a fresh session tagged `<name>`, used to resume it later via `cont`/`poll`/`result`.
 
 | Flag | Required | Meaning |
 |---|---|---|
-| `--class` | yes | `read` \| `analyze` \| `edit` \| `test`. Drives timeouts and what the evidence gate demands — see [Task classes](#task-classes). |
+| `--class` | yes | `read` \| `analyze` \| `edit` \| `test` \| `search`. Drives timeouts and what the evidence gate demands — see [Task classes](#task-classes). |
 | `--dir` | yes | Absolute path that must already exist. opencode cannot read or write outside it (`external_directory` is denied). |
 | `--tag` | yes | The ref used to resume this task. Fails if the tag already has a background task running. |
 | `--scope` | no | Comma-separated paths. Used for edit-class conflict detection between parallel tasks and to flag `scope_violation` if the model edits outside it. Defaults to `--dir` for edit tasks. |
@@ -138,6 +150,7 @@ Undoes an edit-class task's changes: restores files that existed at the recorded
 
 ```
 ocd models [--refresh] [--probe] [--all]
+ocd models --pin <provider/model> | --prefer <substr,substr> | --unpin
 ```
 
 Shows which model would be chosen and why — the inspection surface for [model selection](#model-selection). Prints the ranked candidate chain with each model's score breakdown, context window, published variants, bench state, and last recorded health result.
@@ -147,6 +160,9 @@ Shows which model would be chosen and why — the inspection surface for [model 
 | `--refresh` | Re-enumerate from `opencode models --refresh`, bypassing the 6-hour cache. Use after the provider changes its lineup. |
 | `--probe` | Send a real request to candidates and record the outcome in the health file. Stops at the first healthy model. |
 | `--all` | With `--probe`, probe every candidate instead of stopping at the first healthy one. |
+| `--pin <id>` | Save a model pin to `~/.local/state/ocd/model-pref.json`. Requires a provider-qualified id. |
+| `--prefer <a,b>` | Save a preference order (comma-separated substrings, highest priority first). |
+| `--unpin` | Clear both the saved pin and the saved preference. |
 
 Exits `0` if at least one usable model is available, `1` otherwise.
 
@@ -165,7 +181,8 @@ Health check, run after install and whenever something looks wrong:
 | `opencode_binary` | `opencode --version` succeeds. |
 | `git_binary` | `git --version` succeeds. |
 | `opencode_zen_auth` | `opencode providers list` shows real credentials. |
-| `agent_permissions` | The `ocd-delegate` agent's **live, resolved** permission rules — not just the source jsonc — actually deny the operations this system depends on for safety (see [Safety model](#safety-model)). Resolved config is a flat rules array with base-then-override entries per `(permission, pattern)`; this check takes the *last* matching entry, since that's the one that actually wins. |
+| `agent_has_no_pinned_model` | The installed agent carries no model id of its own. This is how the tool broke before: a pinned id in the agent config, delisted by the provider, unnoticed. `ocd` passes `--model` per dispatch, so the correct value here is *none*, and anything else means a stale install. |
+| `agent_permissions` | The `ocd-delegate` agent's **live, resolved** permission rules — not just the source jsonc — actually deny the operations this system depends on for safety, **and allow** the two web tools `--class search` needs (see [Safety model](#safety-model)). Resolved config is a flat rules array with base-then-override entries per `(permission, pattern)`; this check takes the *last* matching entry, since that's the one that actually wins. |
 | `registry_writable` | The state directory can be written to. |
 | `model_available` | At least one free, tool-calling model resolves and is not benched. With `--probe` or `--live`, candidates are probed for real rather than trusted from metadata — which is the only way to catch a model that reports itself as active but is disabled, geo-blocked, or hanging. |
 | `live_dispatch` | Only with `--live`: one real round-trip dispatch (`"Reply with exactly the word OK"`) against the model selection actually chose, to confirm the whole path works end-to-end, not just its preconditions. |
@@ -239,8 +256,55 @@ The `model` field records which model actually produced the result. It is **not 
 | `analyze` | No | No | Pure reasoning is valid here — e.g. recalling something from earlier in the same session. Still checked for phantom file references if it does cite any. |
 | `edit` | Yes | Yes | Requires a clean git tree in `--dir` up front; verified against a real `git diff`, never the model's claim. Never auto-commits, never pushes. |
 | `test` | Possibly (test artifacts) | Yes | Expected to actually run the project's test command and report real output, not a guessed summary. |
+| `search` | No | Yes, **web** ones | Research against the live web. Requires `websearch`/`webfetch` specifically — local tool calls don't count. Cited URLs are cross-checked against ones actually retrieved. See [Web search](#web-search). |
 
 `analyze` deliberately does not require tool calls — `read`/`edit`/`test` are defined by filesystem interaction (you can't read without reading), but forcing the same requirement on `analyze` reproduced a real bug during development: a purely conversational task got `unverified` on every correct answer, burning real calls across the whole fallback ladder chasing a problem that didn't exist.
+
+## Web search
+
+`ocd run --class search` delegates web research the same way the other classes delegate file work. The point is identical: a research question typically costs the calling agent several search-result blobs and a couple of full page fetches to produce three useful sentences. `--class search` moves that whole sweep to the free model and returns one envelope.
+
+```bash
+ocd run --class search --dir "$PWD" --tag bun-version \
+  "What is the latest stable release of the Bun runtime, and when was it released? Cite sources."
+```
+
+```json
+{
+  "status": "ok",
+  "next": "accept",
+  "text": "The latest stable release of Bun is v1.4.2, released on September 5, 2026 …",
+  "evidence": {
+    "tool_calls": 3,
+    "tools": ["websearch", "webfetch"],
+    "queries": ["Bun JavaScript runtime latest stable release version release date 2026"],
+    "sources": ["https://github.com/oven-sh/bun/releases", "https://bun.sh/blog/bun-v1.4.2", "…"]
+  },
+  "warnings": []
+}
+```
+
+It uses opencode's own native `websearch` tool (Exa-backed) plus `webfetch`, both on the free tier — there is no extra API key to configure and no separate account.
+
+**`sources` and `queries` are the verified part**, exactly as `files_seen` is for a read task. They are built from real tool calls, not from the model's prose:
+
+- `queries` comes from the `query` field of each real `websearch` call.
+- `sources` is the union of every `webfetch` URL and every http(s) URL found in a web tool's **output** — search results carry their URLs in the result body, not in the input, so without scraping the output an honest search would appear to have retrieved nothing. Only the URLs are kept (capped at 20), never the bodies.
+
+The gate is stricter for `search` than for any other non-mutating class, because the failure mode is worse — a confidently wrong answer sourced from stale training data looks exactly like a correct one:
+
+| Situation | Result |
+|---|---|
+| Zero tool calls | `unverified`, warning `no_tool_calls` |
+| Tool calls, but none of them `websearch`/`webfetch` (e.g. it grepped the repo instead) | `unverified`, warning `no_web_tool_calls` |
+| Every cited URL is one it never retrieved | `unverified`, warning `phantom_source_reference:<urls>` |
+| Some cited URLs are invented | `ok` with `phantom_source_reference` warning → `next: send_feedback` |
+
+URL matching requires an **exact host** and treats the path as a prefix. Reusing the file-path matcher would have been wrong in an obvious way: it compares trailing path segments, so two unrelated sites both serving `/releases` would have counted as the same source.
+
+`--dir` is still required and still sandboxes the agent, even though a search task shouldn't touch the filesystem — pass the project the question is about, or `$PWD`. The contract also tells the model not to edit, write, or run shell commands during a search task.
+
+> **Read [Safety model](#safety-model) before turning teammates loose on this.** Enabling web access is not free of consequences: it is the same agent that has `bash` and `edit` allowed.
 
 ## Model selection
 
@@ -303,19 +367,47 @@ Session continuity (the "chat ID") is model-bound: a session only survives a ret
 
 Automatic selection is the default, not a constraint. There are two ways to override it, and the difference between them is the important part:
 
-| | `OCD_MODEL_PREFER` | `OCD_MODEL` |
+| | prefer | pin |
 |---|---|---|
-| What it does | Biases the ranking toward models you name | Pins exactly one model |
+| What it does | Biases the ranking toward models you name | Forces exactly one model |
 | Free-cost + tool-call filter | still applied | **bypassed** |
 | Health-gating | still applied | **bypassed** |
 | Falls back if the model breaks | yes, to the next-best model | no, straight to Claude |
 | Use it for | making a preference stick day to day | debugging one specific model |
+| Per command | `OCD_MODEL_PREFER=a,b` | `OCD_MODEL=<id>` |
+| Persistently | `ocd models --prefer a,b` | `ocd models --pin <id>` |
 
 Start by getting the exact ids — never type one from memory, since the lineup rotates:
 
 ```bash
 ocd models
 ```
+
+#### Making it stick — `ocd models --pin` / `--prefer`
+
+Both overrides have an env-var form and a saved form. The saved form exists because an env var does not survive a new shell, and "export this before every session" is not a usable answer to "make it use that model" — particularly when handing the tool to someone else.
+
+```bash
+ocd models --prefer mimo,ling      # saved preference order
+ocd models --pin opencode/<exact-id-from-ocd-models>
+ocd models --unpin                 # clear both
+```
+
+These write `~/.local/state/ocd/model-pref.json`. **Environment beats file**, so a one-off `OCD_MODEL=… ocd run …` still overrides a saved setting without you having to unset it. The two preference lists are not merged for the same reason — a merged list would leave no way to temporarily override a saved one.
+
+`ocd models` reports what is actually in effect and where it came from, under `override`:
+
+```json
+"override": {
+  "pin": { "id": "opencode/<id>", "from": "file" },
+  "prefer": null,
+  "path": "/Users/you/.local/state/ocd/model-pref.json"
+}
+```
+
+That `from` field is the point of the whole feature being visible rather than silent: from inside a run that picked a surprising model, a pin saved weeks ago in another shell is indistinguishable from no pin at all. A file-sourced preference also shows up in the envelope's `model_notes`.
+
+`--pin` requires a provider-qualified id (`<provider>/<model>`) and rejects a bare name, since a bare name is almost always a `--prefer` substring typed into the wrong flag.
 
 #### Bias the ranking — `OCD_MODEL_PREFER`
 
@@ -334,7 +426,7 @@ A match adds a bonus big enough to be decisive rather than advisory — `+1000` 
 
 Everything else still applies: a preferred model must still be free and tool-calling to be a candidate at all, it is still health-gated, and if it breaks mid-task the ladder still walks on to the next-best model. If nothing matches your substrings — most likely because the model was delisted — selection silently falls back to normal ranking, which is the intended behaviour: your preference degrades into "no preference", not into a failure.
 
-Put the `export` in your shell profile to make it permanent.
+Put the `export` in your shell profile to make it permanent, or use `ocd models --prefer` above and skip the env var entirely.
 
 #### Pin exactly one — `OCD_MODEL`
 
@@ -344,7 +436,7 @@ An escape hatch, honoured verbatim: no discovery, no filtering, no health-gating
 OCD_MODEL=opencode/<exact-id-from-ocd-models> ocd run --class read --dir "$PWD" --tag probe-one "..."
 ```
 
-Prefer setting it per command rather than exporting it — an exported pin disables the entire mechanism that keeps this tool working across a lineup rotation, which is the exact failure this system was built to remove. Two consequences:
+Prefer setting it per command rather than exporting it (or saving it with `ocd models --pin`) — a standing pin disables the entire mechanism that keeps this tool working across a lineup rotation, which is the exact failure this system was built to remove. Two consequences:
 
 - **A pin is the one path that can cost money.** It bypasses the zero-cost filter, so a paid model id will be dispatched to without complaint.
 - **A typo is not caught.** Nothing checks a pinned id against the catalogue, so `ocd models` will report a model that doesn't exist as `selected`, with `ok: true`. Verify a pin with a real request before trusting it:
@@ -364,6 +456,7 @@ Prefer setting it per command rather than exporting it — an exported pin disab
 | `ocd models --probe --all` | Re-test every candidate now and rewrite the health file, instead of waiting for real dispatches to discover what's broken. |
 | `~/.local/state/ocd/model-health.json` | Delete the file — or just one model's entry — to clear the bench and retry a model immediately instead of waiting out its cooldown. A missing or corrupt file is handled: it's rebuilt empty. |
 | `~/.local/state/ocd/models-cache.json` | Deleting it forces re-discovery on the next call; same effect as `--refresh`. |
+| `~/.local/state/ocd/model-pref.json` | The saved pin/preference. `ocd models --unpin` clears it; deleting the file does the same. A corrupt file is ignored rather than fatal — selection falls back to discovery. |
 
 There is deliberately **no `--model` flag on `ocd run`**. Model choice is environment-level so that a Claude-driven delegation can't pick one per task — [`skill/SKILL.md`](skill/SKILL.md) instructs Claude not to name a model and not to treat the one in an envelope as stable. Overriding is a decision you make about your machine, not one the orchestrator makes about a task.
 
@@ -376,7 +469,8 @@ The `ocd-delegate` opencode agent ([`config/agent.ocd-delegate.jsonc`](config/ag
 | `bash` | Allowed, except `git push*`, `git push --force*`, `git reset --hard*`, `rm -rf*`, `sudo*`, and `npm`/`yarn`/`pnpm` `publish*`/`unpublish*` — all denied. |
 | `edit` | Allowed everywhere within `--dir`. The real backstop for edits is the git-diff-truth check in the evidence gate, not this rule. |
 | `read` | Allowed everywhere, except `*.env` / `*.env.*` (asked, not denied outright) and `*.env.example` (allowed). |
-| `webfetch` | Denied. |
+| `webfetch` | **Allowed** — required by `--class search`. Was denied before v0.2.0. |
+| `websearch` | **Allowed** — required by `--class search`. |
 | `external_directory` | Denied — the agent cannot touch anything outside `--dir`. |
 | `doom_loop` | Denied. |
 | `question` | Denied — headless, there's no one to answer an interactive prompt. |
@@ -384,9 +478,150 @@ The `ocd-delegate` opencode agent ([`config/agent.ocd-delegate.jsonc`](config/ag
 
 `ocd doctor`'s `agent_permissions` check re-asserts these against the **live, resolved** config on every run rather than trusting the source file — getting this wrong once (misreading an early, non-winning entry in the resolved rules array instead of the last one) already produced a false conclusion during development. See the header comment in `config/agent.ocd-delegate.jsonc` for the full account.
 
-Two of opencode's permission keys reject a pattern-map form outright and only accept a bare string (`webfetch`, `doom_loop`, `question` — confirmed against opencode `1.18.16`'s config validator; `bash`/`edit`/`read`/`external_directory`/`plan_enter`/`plan_exit` accept pattern-map fine). Getting this wrong doesn't just misconfigure `ocd-delegate` — an invalid agent section fails opencode's *entire* config file, breaking every other agent too. If you add or change a permission key here, verify with `opencode debug agent ocd-delegate` before trusting it.
+Some of opencode's permission keys reject a pattern-map form outright and only accept a bare string (`webfetch`, `websearch`, `doom_loop`, `question` — confirmed against opencode `1.18.16`'s config validator and re-checked against `1.18.29`'s published schema; `bash`/`edit`/`read`/`external_directory`/`plan_enter`/`plan_exit` accept pattern-map fine). Getting this wrong doesn't just misconfigure `ocd-delegate` — an invalid agent section fails opencode's *entire* config file, breaking every other agent too. If you add or change a permission key here, verify with `opencode debug agent ocd-delegate` before trusting it.
 
 Edit-class tasks add a second, independent layer on top of agent permissions: a clean-tree requirement before dispatch, a real `git diff` (never the model's claim) as the source of truth for what changed, and `ocd revert` to undo it. Nothing is ever auto-committed or pushed.
+
+### The web-access tradeoff (read this before rolling it out)
+
+`--class search` requires `webfetch` and `websearch`, and `ocd` uses **one agent** for every class. So the agent that reads attacker-controllable web pages is the same agent that has `bash` and `edit` allowed. That is a real exposure, deliberately accepted, and it is stated here rather than buried:
+
+- A fetched page, a README, a search snippet, or a code sample can contain text addressed to an AI agent — telling it to run a command, modify a file, or ignore its instructions. Nothing in this design makes that impossible.
+- The **hard** backstop is the permission deny-list: `git push`, `git reset --hard`, `rm -rf`, `sudo`, and the publish commands are denied at the opencode layer, so they fail regardless of what a page says. `external_directory` is denied, so nothing outside `--dir` is reachable.
+- The **soft** backstop is the search contract in [`src/contract.ts`](src/contract.ts): retrieved content is data, never instructions; do not edit, write, or run shell commands during a search task. A prompt rule is a mitigation, not a guarantee.
+- The **detective** control is the envelope: `evidence.tools` and `evidence.git.changed` show what a task actually did. A search task that somehow edited files shows up there, because that block is derived from real tool calls and a real `git diff`.
+
+If that trade isn't acceptable for your use, the clean fix is to split the agent — define a second opencode agent with `websearch`/`webfetch` allowed and `bash`/`edit`/`write`/`task` denied, and route `--class search` to it via `dispatch()`'s existing `agent` option (already plumbed through, currently unused). That closes the browse-to-execute path entirely at the cost of a second agent definition to keep in sync.
+
+Two habits reduce the exposure a lot in practice, whatever you decide: keep `--dir` pointed at the specific project a task concerns (never `$HOME` or `/`), and don't run `--class search` and `--class edit` under the same tag.
+
+## Editor integration
+
+`ocd` is a plain CLI, so any agent that can run a shell command can use it. The difference between "available" and "actually used" is two things: telling the agent *when* to delegate, and a **hook** that makes it delegate whether or not it feels like it.
+
+The hook is [`bin/ocd-guard`](bin/ocd-guard). It runs before a file read, and if the file is over 50KB it blocks the read and hands the agent the `ocd run --class read` command to use instead. That takes delegation out of the model's judgment, which is the only way it happens consistently.
+
+Install the hook for every host found on this machine:
+
+```bash
+./install.sh --with-hooks
+```
+
+Each config is backed up to `<file>.bak-<timestamp>` first, and re-running never stacks duplicate entries. To wire one host by hand instead, use the per-host sections below.
+
+**Escape hatches** (all hosts): `OCD_GUARD_DISABLE=1` turns the hook off for a session; `OCD_GUARD_MAX_BYTES` changes the threshold.
+
+### Claude Code
+
+**1. The skill** — `install.sh` already symlinks it to `~/.claude/skills/opencode-delegate/SKILL.md`. It tells Claude when delegating is the right call and how to read an envelope.
+
+**2. The hook** — in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [{ "type": "command", "command": "~/.local/bin/ocd-guard" }]
+      }
+    ]
+  }
+}
+```
+
+**3. Skip the permission prompt** on `ocd` itself, so delegating isn't slower than not delegating — also in `~/.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": ["Bash(ocd:*)"]
+  }
+}
+```
+
+**Verify:** start a session and ask Claude to read a file larger than 50KB. It should come back with the guard's message naming an `ocd run` command instead of the file contents.
+
+### Cursor
+
+**1. The hook** — in `~/.cursor/hooks.json` (or `<project>/.cursor/hooks.json` for one repo only):
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "beforeReadFile": [{ "command": "~/.local/bin/ocd-guard" }]
+  }
+}
+```
+
+Cursor's payload is flat (`file_path` at the top level) and it expects a different denial shape than Claude Code — the guard detects which host called it and answers in the right dialect, so the same binary serves both.
+
+**2. The rule** — Cursor has no skills directory, so the guidance goes in an always-applied rule at `.cursor/rules/ocd.mdc`:
+
+```markdown
+---
+description: Delegate context-heavy work to the ocd CLI
+alwaysApply: true
+---
+
+Before reading a large log, digesting many files just to summarize them, or
+doing a mechanical multi-file edit, delegate it to `ocd` instead of doing it
+inline:
+
+    ocd run --class <read|analyze|edit|test|search> --dir <abs path> --tag <name> "<task>"
+
+Use `--class search` instead of your own web search for any research question
+that would take more than one query.
+
+`ocd` prints one small JSON envelope. Read only that — never the raw output of
+the underlying tool. Trust `evidence` (derived from real tool calls and a real
+git diff), not `text`. Follow the `next` field: accept | send_feedback |
+escalate. Send a correction with `ocd cont <tag> "<feedback>"`.
+```
+
+**Verify:** `cat ~/.cursor/hooks.json` parses, then ask the agent to read a >50KB file.
+
+### Codex CLI
+
+Codex hooks first shipped in `0.114` and are stable and on by default as of `0.141`; check with `codex features list | grep hooks`.
+
+**1. The hook** — in `~/.codex/hooks.json` (or `<repo>/.codex/hooks.json`):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{ "command": "~/.local/bin/ocd-guard" }]
+  }
+}
+```
+
+Codex's `PreToolUse` wire format is identical to Claude Code's — same `tool_name` / `tool_input` on stdin, same `hookSpecificOutput.permissionDecision` on stdout — so the guard needs no Codex-specific handling.
+
+> **Coverage on Codex is best-effort.** Codex reads most files through `shell` (`cat`, `sed`), not through a named read tool, and the guard cannot size-check a shell command without parsing shell. It fires reliably on named read tools and passes shell reads through untouched. The `AGENTS.md` guidance below is doing more of the work here than the hook is.
+
+**2. The guidance** — Codex reads `AGENTS.md` from the repo root. Add:
+
+```markdown
+**Delegating heavy work**
+
+Before reading a large log, digesting many files just to summarize them, or
+running a mechanical multi-file edit, delegate it:
+
+    ocd run --class <read|analyze|edit|test|search> --dir <abs path> --tag <name> "<task>"
+
+For research, `ocd run --class search` replaces doing your own web searching.
+
+`ocd` returns one small JSON envelope. Read only that. `evidence` is verified
+(real tool calls, real git diff); `text` is not. Follow `next`. Iterate with
+`ocd cont <tag> "<feedback>"`, and check `ocd doctor` if everything fails.
+```
+
+**Verify:** `codex features list | grep hooks` shows `stable true`, and `~/.codex/hooks.json` parses.
+
+### Any other agent
+
+There is nothing Claude-specific in the CLI. Give the agent shell access to `ocd`, plus the three rules that matter: pick `--class` honestly, read only the envelope, and trust `evidence` over `text`. [`skill/SKILL.md`](skill/SKILL.md) is the canonical version of that briefing and is short enough to paste into any system prompt.
 
 ## Configuration
 
@@ -399,8 +634,12 @@ Environment variables, read at startup:
 | `OCD_MODEL_PROVIDER` | `opencode` | Provider to enumerate models from. Empty string enumerates every authenticated provider. |
 | `OCD_MODEL` | *(unset)* | Escape hatch: pin one model id, bypassing discovery **and** health routing. Intended for debugging a specific model. |
 | `OCD_MODEL_PREFER` | *(empty)* | Comma-separated substrings that bias ranking toward specific models, highest priority first. Empty by default, so nothing is favoured by name out of the box. |
+| `OCD_GUARD_MAX_BYTES` | `51200` (50KB) | File-size threshold above which the [editor hook](#editor-integration) blocks a direct read. |
+| `OCD_GUARD_DISABLE` | *(unset)* | Set to `1` to turn the editor hook off for a session. |
 
-The three `OCD_MODEL*` variables are how you override model choice by hand — see [Choosing the model yourself](#choosing-the-model-yourself) for which one to use and what each gives up.
+The `OCD_MODEL*` variables are how you override model choice by hand — see [Choosing the model yourself](#choosing-the-model-yourself) for which one to use, what each gives up, and how to make an override persist without an env var at all.
+
+One state file is worth knowing about by name: `~/.local/state/ocd/model-pref.json`, written by `ocd models --pin` / `--prefer`. Env vars take precedence over it, so a one-off `OCD_MODEL=… ocd run …` overrides a saved setting without unsetting anything.
 
 Everything else is a constant in [`src/config.ts`](src/config.ts) — there's no build step, so editing it takes effect on the next invocation:
 
@@ -423,6 +662,7 @@ Per-class timeouts (`TIMEOUTS_MS`):
 | Class | Wall timeout | Stall timeout (no event) |
 |---|---|---|
 | `analyze` | 120s | 45s |
+| `search` | 300s | 90s |
 | `read` | 600s | 90s |
 | `edit` | 900s | 120s |
 | `test` | 900s | 120s |
@@ -446,10 +686,12 @@ One caveat: the config merge re-serializes the entire live `~/.config/opencode/o
 Nothing here is registered with a package manager — it's three symlinks, one merged config key, and a state directory:
 
 ```bash
-rm ~/.local/bin/ocd
+rm ~/.local/bin/ocd ~/.local/bin/ocd-guard
 rm ~/.claude/skills/opencode-delegate/SKILL.md   # then restore SKILL.md.bak-<timestamp> if one exists
-rm -rf ~/.local/state/ocd                         # registry + transcripts; optional
+rm -rf ~/.local/state/ocd                         # registry, transcripts, model pin; optional
 ```
+
+If you ran `install.sh --with-hooks`, also remove the `ocd-guard` entry from whichever of `~/.claude/settings.json`, `~/.cursor/hooks.json` and `~/.codex/hooks.json` it was added to — or restore each file's `.bak-<timestamp>`.
 
 Then remove the `"ocd-delegate"` key under `.agent` in `~/.config/opencode/opencode.jsonc` by hand, or restore the pre-install backup (`opencode.jsonc.bak-<timestamp>`) if you haven't made other changes to that file since installing.
 
@@ -472,14 +714,26 @@ OCD_TEST_SCRATCH=/tmp/ocd-smoke bun test/smoke.ts
 bun test/models.test.ts
 ```
 
-[`test/models.test.ts`](test/models.test.ts) covers [model selection](#model-selection) and is fully offline and deterministic — it runs against fixtures captured from real `opencode models --verbose` output and real provider error strings, so it needs no credentials and makes no API calls. It redirects state to a temp dir, so it will not disturb your real registry or health file. Notably it includes a guard that **fails the build if any concrete `provider/model` id appears in `src/`**, which is the mechanism that keeps the no-hardcoding property from quietly regressing.
+```bash
+bun test/models.test.ts    # model selection, ranking, health, ladder routing
+bun test/search.test.ts    # search gate, URL evidence, contract rules
+bun test/guard.test.ts     # editor hook, all three host dialects
+```
+
+The three offline suites need no credentials, make no API calls, and redirect state to a temp dir — run them first, since a failure there is a real bug rather than a flaky free model.
+
+[`test/search.test.ts`](test/search.test.ts) covers [`--class search`](#web-search): the gate's `no_web_tool_calls` and `phantom_source_reference` paths, host-exact URL matching, tool-output URL scraping, and the assertion that search rules never leak into other classes. [`test/guard.test.ts`](test/guard.test.ts) round-trips the real `bin/ocd-guard` binary as a subprocess against Claude Code, Codex and Cursor payloads — the bytes on stdout and the exit code are all a host ever sees — and asserts every fail-open path.
+
+[`test/models.test.ts`](test/models.test.ts) covers [model selection](#model-selection) and is fully offline and deterministic — it runs against fixtures captured from real `opencode models --verbose` output and real provider error strings, so it needs no credentials and makes no API calls. It redirects state to a temp dir, so it will not disturb your real registry or health file. Notably it includes a guard that **fails the build if any concrete `provider/model` id appears in anything the installer ships** — `src/`, `config/`, `install/`, `bin/`, `install.sh`, `package.json`. That scan originally covered only `src/`, and the gap was a real bug: `config/agent.ocd-delegate.jsonc` went on pinning a delisted model for weeks while the suite reported green.
 
 ## Repo layout
 
 ```
 bin/ocd                            shim: resolves symlinks, execs `bun src/cli.ts`
-install.sh                         idempotent installer
+bin/ocd-guard                      shim for the pre-read hook, execs `bun src/guard.ts`
+install.sh                         idempotent installer (--with-hooks for editor hooks)
 install/merge-config.ts            JSONC-aware config merge, used by install.sh
+install/merge-hooks.ts             per-host hook config merge, used by --with-hooks
 config/agent.ocd-delegate.jsonc    opencode agent definition, merged into opencode.jsonc
 skill/SKILL.md                     Claude Code skill, symlinked into ~/.claude/skills/
 src/cli.ts                         CLI entry point and subcommands
@@ -492,8 +746,11 @@ src/registry.ts                    session/tag registry, file locking, scope cla
 src/verify.ts                      evidence gate + git diff verification
 src/ladder.ts                      fallback ladder decision logic
 src/envelope.ts                    ladder result -> envelope JSON
+src/guard.ts                       pre-read hook: Claude Code / Cursor / Codex
 test/smoke.ts                      end-to-end + fault-injection test suite (live)
 test/models.test.ts                model-selection test suite (offline)
+test/search.test.ts                search gate + URL evidence test suite (offline)
+test/guard.test.ts                 editor-hook test suite (offline)
 ```
 
 ## Known limitations
@@ -501,4 +758,6 @@ test/models.test.ts                model-selection test suite (offline)
 - **Rate-limit detection is partly a keyword heuristic.** When opencode emits a structured error event the reason is read from its `message` field directly; otherwise the fallback is a keyword scan of stderr, which has not been verified against a real 429 from OpenCode Zen (doing so would mean deliberately exhausting the free tier). See `detectErrorHint` in [`src/ladder.ts`](src/ladder.ts).
 - **Ranking is a heuristic, because the provider publishes no quality signal.** Context window, recency, and reasoning support are proxies for capability, not measurements of it — a newly listed model could rank first and simply be worse at the work. Health-gating catches models that are *broken*, not models that are merely *bad*. If you find a model that consistently produces better results, bias toward it with `OCD_MODEL_PREFER` rather than editing the scoring.
 - **A model that fails only under load looks healthy to `--probe`.** Probes use a trivial prompt; a model can answer that instantly and still stall on a real task. Such a model gets benched when it actually fails a dispatch, so the system self-corrects — but the first task to hit it pays the timeout. One free model was observed hanging on two probes and then completing normally on a third, which is why `unresponsive` gets a short escalating cooldown rather than the 24-hour structural one.
+- **The search agent is the same agent as the edit agent.** Enabling `websearch`/`webfetch` puts attacker-controllable text in front of an agent that also has `bash` and `edit`. Mitigated, not eliminated — see [the web-access tradeoff](#the-web-access-tradeoff-read-this-before-rolling-it-out) for what actually stops what, and for the two-agent split if you need the stronger guarantee.
+- **The editor hook only sees named read tools.** It checks file size before a read, which is the one thing it can know in advance with no false positives. It does not catch a large `Bash`/`shell` read (`cat`, `sed`), a grep over a huge tree, or a sweep of many small files — those need heuristics or session state the hook doesn't have. This matters most on Codex, which routes most file reads through `shell`.
 - **Ladder position doesn't persist across separate CLI invocations.** If a `cont` resumes a session that had already fallen back to an L2 alternate model, and that `cont` itself needs to retry, it re-walks the L2 list from the start rather than remembering which alternates were already tried. `MAX_ROUNDS` bounds the resulting damage, and this got much less frequent once the evidence gate stopped over-triggering on `analyze` tasks. See the doc comment on `runWithLadder` in [`src/ladder.ts`](src/ladder.ts).
