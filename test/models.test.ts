@@ -8,7 +8,7 @@
 // State is redirected to a temp dir before anything imports config.ts, since
 // config reads OCD_STATE_DIR at module load.
 
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readdirSync } from "node:fs";
@@ -30,6 +30,10 @@ const {
   isBenched,
   recordModelResult,
   loadHealth,
+  readModelPref,
+  writeModelPref,
+  resolvePin,
+  resolvePrefer,
 } = await import("../src/models.ts");
 const { nextLadderStep, chainFromIds } = await import("../src/ladder.ts");
 const { COOLDOWN_MS, MAX_ALT_MODELS } = await import("../src/config.ts");
@@ -223,18 +227,68 @@ console.log("\n=== ranking ===");
 }
 
 {
-  // OCD_MODEL_PREFER is documented as highest-priority-first, so an earlier
-  // entry must outrank a later one — and any preference must outrank a model
-  // that merely scores well on metadata.
-  const { scoreModel: score2 } = await import("../src/models.ts");
+  // The preference list is documented as highest-priority-first, so an
+  // earlier entry must outrank a later one — and any preference must outrank
+  // a model that merely scores well on metadata. This used to be untestable
+  // (the list was read from module state at import time, so it could not be
+  // varied mid-process); scoreModel now takes it as a parameter, which is
+  // what makes these three assertions possible at all.
   const first = mk({ id: "opencode/alpha", contextLimit: 100_000 });
   const second = mk({ id: "opencode/beta", contextLimit: 100_000 });
   const unlisted = mk({ id: "opencode/gamma", contextLimit: 1_000_000 });
-  // Re-import with a preference list set is not possible mid-process, so
-  // assert the invariant that holds regardless of env: with no preferences,
-  // the bigger-context model wins.
-  check("rank:no_prefer_means_metadata_decides", score2(unlisted).score > score2(first).score);
-  eq("rank:equal_models_score_equal", score2(first).score, score2(second).score);
+  const now = Date.now();
+
+  check("rank:no_prefer_means_metadata_decides", scoreModel(unlisted, now, []).score > scoreModel(first, now, []).score);
+  eq("rank:equal_models_score_equal", scoreModel(first, now, []).score, scoreModel(second, now, []).score);
+
+  const prefer = ["alpha", "beta"];
+  check(
+    "rank:prefer_beats_bigger_context",
+    scoreModel(first, now, prefer).score > scoreModel(unlisted, now, prefer).score,
+  );
+  check(
+    "rank:earlier_prefer_entry_outranks_later",
+    scoreModel(first, now, prefer).score > scoreModel(second, now, prefer).score,
+  );
+  // Only the first matching entry may score — otherwise a model whose id
+  // happens to contain two listed substrings would stack bonuses and jump
+  // the queue ahead of the model the user actually listed first.
+  const both = mk({ id: "opencode/alpha-beta", contextLimit: 100_000 });
+  eq(
+    "rank:prefer_bonus_does_not_stack",
+    scoreModel(both, now, prefer).score,
+    scoreModel(first, now, prefer).score,
+  );
+}
+
+console.log("\n=== persisted model override (ocd models --pin/--prefer) ===");
+
+{
+  // Env must beat the file: a one-off `OCD_MODEL=x ocd run ...` has to
+  // override a saved setting without the user unsetting it first. The suite
+  // sets both env vars to "" at the top, so the file layer is what's live.
+  eq("pref:empty_by_default", JSON.stringify(readModelPref()), JSON.stringify({ version: 1 }));
+  eq("pref:no_pin_by_default", resolvePin(), null);
+  eq("pref:no_prefer_by_default", resolvePrefer(), null);
+
+  writeModelPref({ version: 1, pin: "opencode/pinned-x", prefer: ["aa", "bb"] });
+  eq("pref:pin_round_trips", resolvePin()?.id, "opencode/pinned-x");
+  eq("pref:pin_reports_file_source", resolvePin()?.from, "file");
+  eq("pref:prefer_round_trips", JSON.stringify(resolvePrefer()?.list), JSON.stringify(["aa", "bb"]));
+
+  // Empty fields are dropped rather than persisted as "" / [], so an unpin
+  // leaves a file that reads as "no override" instead of "override to
+  // nothing" — which resolution would otherwise have to special-case.
+  writeModelPref({ version: 1, pin: "", prefer: [] });
+  eq("pref:unpin_clears_pin", resolvePin(), null);
+  eq("pref:unpin_clears_prefer", resolvePrefer(), null);
+  eq("pref:unpin_leaves_clean_file", JSON.stringify(readModelPref()), JSON.stringify({ version: 1 }));
+
+  // A corrupt override file must never break dispatch — the whole point of
+  // the tool is that it degrades to "discover a model" rather than throwing.
+  writeFileSync(join(TMP, "model-pref.json"), "{ not json");
+  eq("pref:corrupt_file_is_ignored", resolvePin(), null);
+  writeModelPref({ version: 1 });
 }
 
 console.log("\n=== failure classification (ground-truthed strings) ===");

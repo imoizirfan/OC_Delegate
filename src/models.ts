@@ -3,8 +3,9 @@ import {
   OPENCODE_BIN,
   STATE_DIR,
   MODEL_PROVIDER,
-  MODEL_PIN,
-  MODEL_PREFER,
+  MODEL_PIN_ENV,
+  MODEL_PREFER_ENV,
+  MODEL_PREF_PATH,
   MODELS_CACHE_PATH,
   MODEL_HEALTH_PATH,
   MODELS_CACHE_TTL_MS,
@@ -269,6 +270,66 @@ function writeModelsCache(models: ModelInfo[], fetchedAt: number): void {
   }
 }
 
+// --- persisted model override ----------------------------------------------
+
+/** Shape of MODEL_PREF_PATH. Both fields optional: a user may pin without
+ * expressing a preference order, or vice versa. */
+export interface ModelPrefFile {
+  version: 1;
+  /** Exact model id to force, bypassing discovery and health routing. */
+  pin?: string;
+  /** Substrings biasing ranking, highest priority first. */
+  prefer?: string[];
+}
+
+export function readModelPref(): ModelPrefFile {
+  try {
+    if (existsSync(MODEL_PREF_PATH)) {
+      const parsed = JSON.parse(readFileSync(MODEL_PREF_PATH, "utf8")) as ModelPrefFile;
+      if (parsed?.version === 1) return parsed;
+    }
+  } catch {
+    /* a corrupt override file must not break dispatch — fall through to discovery */
+  }
+  return { version: 1 };
+}
+
+export function writeModelPref(pref: ModelPrefFile): void {
+  ensureStateDir();
+  // Drop empty fields rather than persisting `"pin": ""`, so `--unpin`
+  // leaves a file that reads as "no override" instead of "override to
+  // nothing", which the resolution below would have to special-case.
+  const out: ModelPrefFile = { version: 1 };
+  if (pref.pin) out.pin = pref.pin;
+  if (pref.prefer?.length) out.prefer = pref.prefer;
+  writeFileSync(MODEL_PREF_PATH, JSON.stringify(out, null, 2) + "\n");
+}
+
+export type OverrideSource = "env" | "file";
+
+/** The pin actually in effect, and where it came from.
+ *
+ * Env beats file so a one-off `OCD_MODEL=x ocd run ...` overrides a saved
+ * setting without the user having to unset it first. Reporting the source
+ * matters: "pinned" and "pinned by something you configured three weeks ago
+ * in another shell" are very different things to debug. */
+export function resolvePin(): { id: string; from: OverrideSource } | null {
+  if (MODEL_PIN_ENV) return { id: MODEL_PIN_ENV, from: "env" };
+  const file = readModelPref();
+  if (file.pin) return { id: file.pin, from: "file" };
+  return null;
+}
+
+/** The preference list actually in effect. Same env-over-file precedence;
+ * the two are NOT concatenated, since a merged list would give a user no way
+ * to temporarily override a saved preference at all. */
+export function resolvePrefer(): { list: string[]; from: OverrideSource } | null {
+  if (MODEL_PREFER_ENV.length) return { list: MODEL_PREFER_ENV, from: "env" };
+  const file = readModelPref();
+  if (file.prefer?.length) return { list: file.prefer, from: "file" };
+  return null;
+}
+
 // --- health ----------------------------------------------------------------
 
 export function loadHealth(): HealthFile {
@@ -516,9 +577,16 @@ export interface ScoredModel {
  *    can't leapfrog a much larger established one.
  *  - reasoning support is a small bonus; the delegated work is mechanical but
  *    the evidence contract asks for structured output.
- *  - OCD_MODEL_PREFER contributes a large, explicit, user-controlled bonus.
- *    It defaults to empty, so out of the box nothing is favoured by name. */
-export function scoreModel(m: ModelInfo, now = Date.now()): { score: number; reason: string } {
+ *  - the resolved preference list (OCD_MODEL_PREFER, or `ocd models --prefer`)
+ *    contributes a large, explicit, user-controlled bonus. It defaults to
+ *    empty, so out of the box nothing is favoured by name. Passed in rather
+ *    than read from module state so a caller — and the test suite — can score
+ *    against an arbitrary list without re-importing the module. */
+export function scoreModel(
+  m: ModelInfo,
+  now = Date.now(),
+  prefer: string[] = resolvePrefer()?.list ?? [],
+): { score: number; reason: string } {
   const parts: string[] = [];
   let score = 0;
 
@@ -547,14 +615,14 @@ export function scoreModel(m: ModelInfo, now = Date.now()): { score: number; rea
     parts.push("variants(+2)");
   }
 
-  // Earlier entries in OCD_MODEL_PREFER outrank later ones, and any listed
+  // Earlier entries in the preference list outrank later ones, and any listed
   // model outranks any unlisted one. The stride is deliberately far larger
   // than the whole metadata range (which tops out around 80) so the user's
   // stated order is decisive rather than merely a nudge that a slightly
   // larger context window can overturn — an explicit preference is a
   // decision, not a hint. The floor keeps the ordering sane for long lists.
-  for (let i = 0; i < MODEL_PREFER.length; i++) {
-    const pref = MODEL_PREFER[i]!;
+  for (let i = 0; i < prefer.length; i++) {
+    const pref = prefer[i]!;
     if (pref && m.id.includes(pref)) {
       const bonus = Math.max(1000 - i * 100, 100);
       score += bonus;
@@ -574,10 +642,15 @@ export function scoreModel(m: ModelInfo, now = Date.now()): { score: number; rea
  * produces a real error, and still escalates to Claude with evidence. Sorting
  * rather than filtering keeps the "always have a next thing to try" property
  * without ever preferring a known-broken model over a working one. */
-export function rankModels(models: ModelInfo[], health: HealthFile, now = Date.now()): ScoredModel[] {
+export function rankModels(
+  models: ModelInfo[],
+  health: HealthFile,
+  now = Date.now(),
+  prefer: string[] = resolvePrefer()?.list ?? [],
+): ScoredModel[] {
   return models
     .map((model) => {
-      const { score, reason } = scoreModel(model, now);
+      const { score, reason } = scoreModel(model, now, prefer);
       const benched = isBenched(health.models[model.id], now);
       const entry = health.models[model.id];
       return {
@@ -633,13 +706,18 @@ export interface ModelChain {
 export async function resolveModelChain(opts: { refresh?: boolean } = {}): Promise<ModelChain> {
   const warnings: string[] = [];
 
-  if (MODEL_PIN) {
+  const pin = resolvePin();
+  if (pin) {
     // An explicit pin is an escape hatch: honour it verbatim, no discovery,
     // no health gating, so a user debugging a specific model always gets it.
+    // The source is reported because a pin from a file written weeks ago in
+    // another shell looks identical, from inside a failing run, to no pin at
+    // all — and "why is it using that model" is the question this answers.
+    const via = pin.from === "env" ? "OCD_MODEL" : `${MODEL_PREF_PATH} (ocd models --pin)`;
     const pinned: ModelInfo = {
-      id: MODEL_PIN,
-      name: MODEL_PIN,
-      family: MODEL_PIN,
+      id: pin.id,
+      name: pin.id,
+      family: pin.id,
       status: "active",
       contextLimit: 0,
       outputLimit: 0,
@@ -649,12 +727,20 @@ export async function resolveModelChain(opts: { refresh?: boolean } = {}): Promi
       variants: [],
     };
     return {
-      chain: [{ model: pinned, score: 0, benched: false, reason: "pinned via OCD_MODEL" }],
-      warnings: [`model pinned to ${MODEL_PIN} via OCD_MODEL — discovery and health routing disabled`],
+      chain: [{ model: pinned, score: 0, benched: false, reason: `pinned via ${via}` }],
+      warnings: [`model pinned to ${pin.id} via ${via} — discovery and health routing disabled`],
       source: "live",
       fetchedAt: Date.now(),
-      pinned: MODEL_PIN,
+      pinned: pin.id,
     };
+  }
+
+  // A preference from the pref file is not an error, but it IS something the
+  // envelope should say out loud: it silently reorders the chain, so a run
+  // that picked an unexpected model has a documented reason in model_notes.
+  const preferred = resolvePrefer();
+  if (preferred?.from === "file") {
+    warnings.push(`model preference ${JSON.stringify(preferred.list)} applied from ${MODEL_PREF_PATH} (ocd models --prefer)`);
   }
 
   let models: ModelInfo[] = [];

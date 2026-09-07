@@ -28,14 +28,23 @@ import {
   STATE_DIR,
   TRANSCRIPT_DIR,
   PROBE_TIMEOUT_MS,
-  MODEL_PIN,
+  MODEL_PREF_PATH,
 } from "./config.ts";
-import { resolveModelChain, probeChain, loadHealth, pickVariant } from "./models.ts";
+import {
+  resolveModelChain,
+  probeChain,
+  loadHealth,
+  pickVariant,
+  readModelPref,
+  writeModelPref,
+  resolvePin,
+  resolvePrefer,
+} from "./models.ts";
 import type { Envelope, TaskClass } from "./types.ts";
 
 // --- tiny hand-rolled arg parser (no deps) ---------------------------------
 
-const BOOLEAN_FLAGS = new Set(["bg", "fresh", "with-diff", "live", "probe", "refresh", "all"]);
+const BOOLEAN_FLAGS = new Set(["bg", "fresh", "with-diff", "live", "probe", "refresh", "all", "unpin"]);
 
 interface ParsedArgs {
   command: string;
@@ -495,7 +504,7 @@ interface DoctorCheck {
   detail: string;
 }
 
-/** `ocd models [--refresh] [--probe] [--all]`
+/** `ocd models [--refresh] [--probe] [--all] [--pin <id>] [--prefer <a,b>] [--unpin]`
  *
  * Shows exactly which model would be chosen and why. This is the inspection
  * surface for the whole selection mechanism — without it, "we pick the best
@@ -507,6 +516,52 @@ async function cmdModels(args: ParsedArgs): Promise<void> {
   const refresh = args.flags["refresh"] === true;
   const doProbe = args.flags["probe"] === true;
   const probeAll = args.flags["all"] === true;
+
+  // --pin / --prefer / --unpin persist an override to STATE_DIR and exit.
+  // They are handled before resolution so `ocd models --pin X` reports the
+  // state it just wrote rather than the chain it would have resolved without
+  // it. Writing here (rather than in a separate `ocd model` command) keeps
+  // the whole model-selection surface under one verb.
+  const pinFlag = strFlag(args, "pin");
+  const preferFlag = strFlag(args, "prefer");
+  const unpin = args.flags["unpin"] === true;
+  if (pinFlag !== undefined || preferFlag !== undefined || unpin) {
+    if (unpin && (pinFlag !== undefined || preferFlag !== undefined)) {
+      fail("--unpin clears the saved override; don't combine it with --pin or --prefer");
+    }
+    const current = readModelPref();
+    const next = unpin
+      ? { version: 1 as const }
+      : {
+          version: 1 as const,
+          pin: pinFlag !== undefined ? pinFlag : current.pin,
+          prefer:
+            preferFlag !== undefined
+              ? preferFlag.split(",").map((x) => x.trim()).filter(Boolean)
+              : current.prefer,
+        };
+    if (!unpin && pinFlag !== undefined && !pinFlag.includes("/")) {
+      fail(
+        `--pin expects a provider-qualified model id (e.g. '<provider>/<model>'), got '${pinFlag}'. ` +
+          "Run `ocd models` to see the exact ids currently on offer, or use --prefer for substring matching.",
+      );
+    }
+    writeModelPref(next);
+    const pin = resolvePin();
+    const prefer = resolvePrefer();
+    printJSON({
+      ok: true,
+      saved: next,
+      path: MODEL_PREF_PATH,
+      effective_pin: pin ? { id: pin.id, from: pin.from } : null,
+      effective_prefer: prefer ? { list: prefer.list, from: prefer.from } : null,
+      note:
+        pin?.from === "env" || prefer?.from === "env"
+          ? "OCD_MODEL / OCD_MODEL_PREFER is set in this environment and takes precedence over the saved file"
+          : undefined,
+    });
+    return;
+  }
 
   const resolved = await resolveModelChain({ refresh });
   const health = loadHealth();
@@ -526,6 +581,11 @@ async function cmdModels(args: ParsedArgs): Promise<void> {
     selected: usable[0]?.model.id ?? null,
     variant: usable[0] ? (pickVariant(usable[0].model) ?? null) : null,
     pinned: resolved.pinned,
+    override: {
+      pin: resolvePin(),
+      prefer: resolvePrefer(),
+      path: MODEL_PREF_PATH,
+    },
     source: resolved.source,
     fetched_at: new Date(resolved.fetchedAt).toISOString(),
     warnings: resolved.warnings,
@@ -747,6 +807,7 @@ async function main(): Promise<void> {
           "  ocd drop <ref>\n" +
           "  ocd revert <ref>\n" +
           "  ocd models [--refresh] [--probe] [--all]\n" +
+          "  ocd models --pin <provider/model> | --prefer <substr,substr> | --unpin\n" +
           "  ocd doctor [--live] [--probe] [--refresh]",
       );
       process.exit(1);

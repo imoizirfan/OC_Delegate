@@ -23,18 +23,32 @@ export const TRANSCRIPT_DIR = join(STATE_DIR, "transcripts");
 /** Provider to enumerate. Empty string lists every authenticated provider. */
 export const MODEL_PROVIDER = process.env.OCD_MODEL_PROVIDER ?? "opencode";
 
-/** Escape hatch: pin one model, skipping discovery and health routing. */
-export const MODEL_PIN = process.env.OCD_MODEL || "";
+/** Escape hatch: pin one model, skipping discovery and health routing.
+ * This is the ENV layer only — `ocd models --pin` persists the same override
+ * to MODEL_PREF_PATH, and models.ts resolves the two with env winning. */
+export const MODEL_PIN_ENV = process.env.OCD_MODEL || "";
 
 /** Substrings that bias ranking toward specific models, highest priority
- * first. Empty by default — nothing is favoured by name unless asked. */
-export const MODEL_PREFER = (process.env.OCD_MODEL_PREFER || "")
+ * first. Empty by default — nothing is favoured by name unless asked. Also
+ * the ENV layer only; see MODEL_PREF_PATH. */
+export const MODEL_PREFER_ENV = (process.env.OCD_MODEL_PREFER || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
 export const MODELS_CACHE_PATH = join(STATE_DIR, "models-cache.json");
 export const MODEL_HEALTH_PATH = join(STATE_DIR, "model-health.json");
+
+/** Persisted model override, written by `ocd models --pin/--prefer`.
+ *
+ * Exists because the env vars are the only override this tool had, and an
+ * env var does not survive a new shell — telling a teammate "export OCD_MODEL
+ * before every session" is not a usable answer to "make it use this model".
+ * Env still wins over the file so a one-off `OCD_MODEL=... ocd run` overrides
+ * a saved setting without having to unset it. NOTE: no model id is stored in
+ * the repo by this mechanism — the file lives in STATE_DIR, on the machine.
+ */
+export const MODEL_PREF_PATH = join(STATE_DIR, "model-pref.json");
 
 /** Re-enumerate models at most this often. Discovery reads opencode's own
  * on-disk cache and costs ~0.5s, so this is about avoiding repeated spawns
