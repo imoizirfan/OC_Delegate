@@ -538,31 +538,59 @@ console.log("\n=== dead-model detection (the `empty` trap) ===");
   eq("dead:plain_empty_still_retries_same_model", [d.action, d.model], ["retry", "m0"]);
 }
 
-console.log("\n=== no hardcoded model ids in source ===");
+console.log("\n=== no hardcoded model ids anywhere in the repo ===");
 
 {
   // The guarantee this whole change exists to provide. A literal
-  // `provider/model` id anywhere in src/ is a future outage: the previous
+  // `provider/model` id anywhere shippable is a future outage: the previous
   // lineup was written down once and three of its four entries were dead
-  // within weeks. Test fixtures and the pin escape hatch are exempt.
-  const srcDir = join(import.meta.dir, "..", "src");
+  // within weeks.
+  //
+  // This originally scanned only src/*.ts, and that gap was a real bug —
+  // config/agent.ocd-delegate.jsonc went on pinning a delisted model for
+  // weeks while this test reported green, because the installed opencode
+  // agent is just as much a place an id can rot as the TypeScript is. The
+  // scan now covers every file the installer actually ships. Test fixtures
+  // (this file, test/smoke.ts) and the OCD_MODEL pin escape hatch are
+  // exempt by construction: neither is in the scanned set.
+  const repoRoot = join(import.meta.dir, "..");
+  const scanned: string[] = [];
   const offenders: string[] = [];
   // Matches a quoted "opencode/<something>" style provider-qualified id.
   const idPattern = /["'`](opencode|anthropic|openai|google|deepseek)\/[a-z0-9][a-z0-9.\-]*["'`]/gi;
-  for (const f of readdirSync(srcDir)) {
-    if (!f.endsWith(".ts")) continue;
-    const body = readFileSync(join(srcDir, f), "utf8");
-    // Strip comments — documenting a dead id in prose is fine and useful.
+
+  const targets: { dir: string; keep: (f: string) => boolean }[] = [
+    { dir: "src", keep: (f) => f.endsWith(".ts") },
+    { dir: "config", keep: (f) => f.endsWith(".jsonc") || f.endsWith(".json") },
+    { dir: "install", keep: (f) => f.endsWith(".ts") },
+    { dir: "bin", keep: () => true },
+  ];
+
+  const files: string[] = ["package.json", "install.sh"];
+  for (const t of targets) {
+    for (const f of readdirSync(join(repoRoot, t.dir))) {
+      if (t.keep(f)) files.push(join(t.dir, f));
+    }
+  }
+
+  for (const rel of files) {
+    const body = readFileSync(join(repoRoot, rel), "utf8");
+    scanned.push(rel);
+    // Strip comments — documenting a dead id in prose is fine and useful,
+    // and both the jsonc agent fragment and the .ts sources do exactly that.
+    // `#` covers the shell scripts in bin/ and install.sh.
     const code = body
       .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/^\s*\/\/.*$/gm, "");
+      .replace(/^\s*\/\/.*$/gm, "")
+      .replace(/^\s*#.*$/gm, "");
     const hits = code.match(idPattern);
-    if (hits) offenders.push(`${f}: ${hits.join(", ")}`);
+    if (hits) offenders.push(`${rel}: ${hits.join(", ")}`);
   }
+
   check(
     "source:no_hardcoded_model_ids",
     offenders.length === 0,
-    offenders.length ? offenders.join(" | ") : "none in src/*.ts",
+    offenders.length ? offenders.join(" | ") : `none across ${scanned.length} shipped files`,
   );
 }
 

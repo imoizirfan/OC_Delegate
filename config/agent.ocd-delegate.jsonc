@@ -1,7 +1,16 @@
 // Merged into ~/.config/opencode/opencode.jsonc by install.sh under `agent.ocd-delegate`.
 //
+// There is deliberately no `model` key here. This file used to pin one, and
+// that pinned id was delisted by the provider — leaving the installed agent
+// permanently pointed at a model that no longer existed. ocd resolves a model
+// at runtime and passes it explicitly on every dispatch (`--model`, see
+// src/dispatch.ts), and refuses to dispatch at all without one rather than
+// letting opencode fall back to its own default, which is very likely PAID.
+// An agent-level model would therefore never be used, only rot. Keep it out;
+// test/models.test.ts fails the build if a concrete model id reappears here.
+//
 // Permission key forms are NOT uniform, confirmed against opencode
-// v1.18.16's own config validator (not guessed):
+// v1.18.16's own config validator and re-verified on v1.18.29 (not guessed):
 //   - `bash`/`edit`/`read`/`external_directory`/`plan_enter`/`plan_exit`
 //     accept the pattern-map form ({"*": "deny", "some-pattern*": "allow"}).
 //   - `webfetch`/`doom_loop`/`question` REJECT pattern-map outright — using
@@ -25,7 +34,6 @@
 {
   "ocd-delegate": {
     "mode": "primary",
-    "model": "opencode/deepseek-v4-flash-free",
     "maxSteps": 40,
     "permission": {
       "edit": { "*": "allow" },
