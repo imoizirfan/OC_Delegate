@@ -64,7 +64,10 @@ const MAX_RESULT_URLS = 500;
 export function extractResultUrls(output: string | undefined): string[] {
   if (!output) return [];
   const out = new Set<string>();
-  for (const m of output.matchAll(/https?:\/\/[^\s"'<>)\]}\\]+/gi)) {
+  // Parentheses are allowed only as a balanced pair inside the URL, so
+  // en.wikipedia.org/wiki/Bun_(software) survives intact while the closing
+  // paren of a markdown link, `[x](https://a.com/b)`, is still excluded.
+  for (const m of output.matchAll(/https?:\/\/(?:[^\s"'<>()[\]{}\\]|\([^\s"'<>()\\]*\))+/gi)) {
     out.add(m[0].replace(/[.,;:!?]+$/, ""));
     if (out.size >= MAX_RESULT_URLS) break;
   }
