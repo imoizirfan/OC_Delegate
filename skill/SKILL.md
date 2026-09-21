@@ -1,6 +1,6 @@
 ---
 name: opencode-delegate
-description: Reminds Claude Code to hand off context-heavy, low-reasoning work to opencode (via the `ocd` wrapper) instead of doing it inline, per the dispatch matrix in SETUP.md. Trigger before reading large logs, doing bulk file summarization, or mechanical multi-file refactors that don't need Claude-level judgment.
+description: Reminds Claude Code to hand off context-heavy, low-reasoning work to opencode (via the `ocd` wrapper) instead of doing it inline. Trigger before reading large logs, doing bulk file summarization, or mechanical multi-file refactors that don't need Claude-level judgment.
 ---
 
 # opencode delegate
@@ -9,7 +9,7 @@ Before reading a large log, digesting many files just to summarize them, or doin
 
 1. Confirm the system is healthy: `ocd doctor`. If any check fails, say so and fall back to doing the task inline rather than guessing at a broken setup.
 2. Delegate the raw/bulky work to `ocd run`. Claude Code should only ever read `ocd`'s envelope (a small fixed-shape JSON object), never opencode's raw NDJSON stream or a directory's raw file contents.
-3. Skip delegation when the task genuinely needs Claude-level reasoning (architecture calls, tricky debugging, anything where the "cheap model" framing in `~/SecondBrain/02-Areas/Dev-Environment/SETUP.md` section 4 doesn't apply).
+3. Skip delegation when the task genuinely needs Claude-level reasoning: architecture calls, tricky debugging, requirements that are still ambiguous, or anything where a wrong answer from a cheaper model would cost more to catch than doing the work yourself. Delegate because a task is mechanical, not because it is long.
 
 ## Why `ocd`, not a bare `opencode run`
 
@@ -34,7 +34,7 @@ ocd models [--probe]                 # which model is selected, and why
 ocd doctor [--live]
 ```
 
-**`--dir` must be an absolute path** to the project the task concerns — same sandboxing principle as before: never point it at `$HOME` or `/`, and don't delegate work that genuinely needs access outside a normal project directory.
+**`--dir` must be an absolute path** to the project the task concerns. It is the delegate's sandbox: never point it at `$HOME` or `/`, and don't delegate work that genuinely needs access outside a normal project directory.
 
 **Pick `--class` honestly** — it changes what's verified and how long `ocd` will wait before giving up:
 - `read` / `analyze` — no filesystem mutation expected; the gate just requires real tool calls behind any claimed fact.
