@@ -1,5 +1,5 @@
 import { dispatch, isPermissionDenial, sanitizeDenialMessage, type DispatchResult } from "./dispatch.ts";
-import { evaluateGate, diffAgainst, type GateResult } from "./verify.ts";
+import { evaluateGate, diffAgainst, repoRoot, scopeToRepoPaths, type GateResult } from "./verify.ts";
 import { buildSharpenedRetryPrompt } from "./contract.ts";
 import { MAX_LADDER, MAX_ALT_MODELS } from "./config.ts";
 import {
@@ -383,8 +383,13 @@ export async function runWithLadder(opts: LadderRunOptions): Promise<LadderRunRe
     if (lastDispatch.sessionId) sessionId = lastDispatch.sessionId;
 
     let git: GitEvidence | undefined;
+    let scope = opts.scope;
     if (opts.taskClass === "edit" && opts.baseHead) {
       git = await diffAgainst(opts.dir, opts.baseHead);
+      // git reports repo-root-relative paths; the scope is absolute or
+      // --dir-relative. Put both in git's frame before comparing.
+      const root = await repoRoot(opts.dir);
+      if (root && scope?.length) scope = scopeToRepoPaths(scope, opts.dir, root);
     }
 
     lastGate = evaluateGate({
@@ -392,7 +397,7 @@ export async function runWithLadder(opts: LadderRunOptions): Promise<LadderRunRe
       finalText: lastDispatch.textParts.at(-1) ?? "",
       toolUses: lastDispatch.toolUses,
       git,
-      scope: opts.scope,
+      scope,
     });
 
     const classified = classifyStatus(lastDispatch, lastGate);

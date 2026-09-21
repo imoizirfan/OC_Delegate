@@ -1,6 +1,8 @@
 import type { Evidence, GitEvidence, TaskClass } from "./types.ts";
 import type { ToolUseRecord } from "./dispatch.ts";
 import { FILES_SEEN_CAP } from "./config.ts";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 async function runGit(dir: string, args: string[]): Promise<{ stdout: string; exitCode: number }> {
   const proc = Bun.spawn({ cmd: ["git", ...args], cwd: dir, stdout: "pipe", stderr: "pipe" });
@@ -24,6 +26,43 @@ export async function currentBranch(dir: string): Promise<string | null> {
   return exitCode === 0 ? stdout.trim() : null;
 }
 
+export async function repoRoot(dir: string): Promise<string | null> {
+  const { stdout, exitCode } = await runGit(dir, ["rev-parse", "--show-toplevel"]);
+  return exitCode === 0 ? stdout.trim() : null;
+}
+
+/** realpath that tolerates a path which doesn't exist yet (a scope can name a
+ * file the task is about to create): resolve the deepest existing ancestor and
+ * re-append the rest. Without this, /tmp vs /private/tmp on macOS makes a
+ * scope and the git root disagree about a directory they both name. */
+function realpathLoose(p: string): string {
+  const tail: string[] = [];
+  let cur = p;
+  while (!existsSync(cur)) {
+    const parent = dirname(cur);
+    if (parent === cur) return p;
+    tail.unshift(basename(cur));
+    cur = parent;
+  }
+  try {
+    return join(realpathSync(cur), ...tail);
+  } catch {
+    return p;
+  }
+}
+
+/** Rewrite --scope entries into the form git reports changed paths in:
+ * relative to the repository root. A scope entry may be absolute (the
+ * default scope is `--dir` itself) or relative to `--dir`; git's paths are
+ * neither, so comparing them directly flagged every file of every edit task
+ * as a scope_violation. An entry that resolves outside the repo comes back
+ * starting with `..`, which no changed path can match — correctly. */
+export function scopeToRepoPaths(scope: string[], dir: string, root: string): string[] {
+  const realDir = realpathLoose(dir);
+  const realRoot = realpathLoose(root);
+  return scope.map((s) => relative(realRoot, isAbsolute(s) ? realpathLoose(s) : resolve(realDir, s)));
+}
+
 /** Diffstat against baseHead plus untracked new files — this is the ONLY
  * source of truth for "what did an edit task actually change". The model's
  * own claims about what it edited are never trusted (see evaluateGate). */
@@ -43,7 +82,7 @@ export async function diffAgainst(dir: string, baseHead: string): Promise<GitEvi
     }
   }
 
-  const untracked = await runGit(dir, ["ls-files", "--others", "--exclude-standard"]);
+  const untracked = await runGit(dir, ["ls-files", "--others", "--exclude-standard", "--full-name"]);
   if (untracked.exitCode === 0) {
     for (const path of untracked.stdout.split("\n")) {
       if (!path.trim() || changed.has(path)) continue;

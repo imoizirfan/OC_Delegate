@@ -727,15 +727,16 @@ OCD_TEST_SCRATCH=/tmp/ocd-smoke bun test/smoke.ts
 [`test/smoke.ts`](test/smoke.ts) is not a mocked unit-test suite — most checks dispatch real tasks through the real, installed `ocd` (`OCD_TEST_BIN` can override the binary path) against `OCD_TEST_SCRATCH`, so they cost real free-tier calls and take real wall-clock time. Run `ocd doctor` first; a failing precondition there will just show up as confusing test failures. It covers: fault injection against the pure ladder/gate functions (no dispatch), live model selection, the golden hallucination regression, session continuity across two separate process invocations, an edit-plus-revert round trip, parallel scope-conflict detection, and a context-savings measurement (raw transcript bytes vs. envelope bytes).
 
 ```bash
-bun run test               # all three offline suites
+bun run test               # all four offline suites
 bun run typecheck
 
 bun test/models.test.ts    # model selection, ranking, health, ladder routing
 bun test/search.test.ts    # search gate, URL evidence, contract rules
 bun test/guard.test.ts     # editor hook, all three host dialects
+bun test/verify.test.ts    # edit verification: git paths vs --scope
 ```
 
-The three offline suites need no credentials, make no API calls, and redirect state to a temp dir — run them first, since a failure there is a real bug rather than a flaky free model.
+The four offline suites need no credentials, make no API calls, and redirect state to a temp dir — run them first, since a failure there is a real bug rather than a flaky free model.
 
 [`test/search.test.ts`](test/search.test.ts) covers [`--class search`](#web-search): the gate's `no_web_tool_calls` and `phantom_source_reference` paths, host-exact URL matching, tool-output URL scraping, and the assertion that search rules never leak into other classes. [`test/guard.test.ts`](test/guard.test.ts) round-trips the real `bin/ocd-guard` binary as a subprocess against Claude Code, Codex and Cursor payloads — the bytes on stdout and the exit code are all a host ever sees — and asserts every fail-open path.
 
@@ -766,6 +767,7 @@ test/smoke.ts                      end-to-end + fault-injection test suite (live
 test/models.test.ts                model-selection test suite (offline)
 test/search.test.ts                search gate + URL evidence test suite (offline)
 test/guard.test.ts                 editor-hook test suite (offline)
+test/verify.test.ts                edit-verification test suite (offline)
 ```
 
 ## Known limitations

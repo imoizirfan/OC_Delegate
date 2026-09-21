@@ -9,8 +9,8 @@
     "ocd": "./bin/ocd"
   },
   "scripts": {
-    "test": "bun test/models.test.ts && bun test/search.test.ts && bun test/guard.test.ts",
-    "test:offline": "bun test/models.test.ts && bun test/search.test.ts && bun test/guard.test.ts",
+    "test": "bun test/models.test.ts && bun test/search.test.ts && bun test/guard.test.ts && bun test/verify.test.ts",
+    "test:offline": "bun test/models.test.ts && bun test/search.test.ts && bun test/guard.test.ts && bun test/verify.test.ts",
     "test:live": "bun test/smoke.ts",
     "typecheck": "tsc --noEmit"
   },
