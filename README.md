@@ -6,7 +6,7 @@ That covers bulk file reading, mechanical edits, running tests, and (since v0.2.
 
 It exists because a bare `opencode run` has three problems that make it unsafe to hand raw output to Claude: `--format json` inflates content instead of compressing it, the free model will confidently hallucinate filesystem facts with zero tool calls behind them, and the exit code is `0` even when a task was denied by policy. `ocd` fixes all three: it strips tool payloads down to a compact envelope, runs an evidence gate that never trusts the model's prose, and derives status from the real event stream.
 
-Single-user tool — paths default under `$HOME`, not published to any package registry. Installed per machine from this repo.
+Installed per machine by cloning this repo and running `./install.sh` — it isn't published to any package registry, and all state lives under your `$HOME`. MIT licensed.
 
 ## Contents
 
@@ -27,13 +27,14 @@ Single-user tool — paths default under `$HOME`, not published to any package r
 - [Testing](#testing)
 - [Repo layout](#repo-layout)
 - [Known limitations](#known-limitations)
+- [License](#license)
 
 ## Requirements
 
-- [Bun](https://bun.sh) ≥ 1.0 — the CLI runs directly as TypeScript, no build step.
+- [Bun](https://bun.sh) ≥ 1.0 — the CLI runs directly as TypeScript, no build step. Install with `brew install oven-sh/bun/bun`, or `curl -fsSL https://bun.sh/install | bash` (the curl installer puts bun in `~/.bun/bin`; open a new shell afterwards so it's on `PATH`).
 - [opencode](https://opencode.ai) CLI. No login is needed for the free models — OpenCode Zen serves them anonymously. Run `opencode auth login` only if `ocd doctor --probe` reports an auth failure.
 - `git`, on `PATH`.
-- macOS or Linux. Built and tested against opencode `1.18.29` and bun `1.3.14`; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.29` and should be re-checked with `ocd doctor` after any opencode upgrade.
+- macOS or Linux. Last verified end to end against opencode `1.18.31` and bun `1.4.2` on macOS; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.31` and should be re-checked with `ocd doctor` after any opencode upgrade.
 - Optional, for [editor integration](#editor-integration): Claude Code, Cursor, or Codex CLI ≥ `0.114` (hooks are stable and on by default as of `0.141`).
 
 Model availability is **not** a requirement you need to check by hand — `ocd` discovers free models at runtime and routes around broken ones. See [Model selection](#model-selection).
@@ -43,9 +44,18 @@ Model availability is **not** a requirement you need to check by hand — `ocd` 
 ## Install
 
 ```bash
-git clone git@github.com:imoizirfan/OC_Delegate.git ~/OC_Delegate
-cd ~/OC_Delegate
+git clone https://github.com/imoizirfan/OC_Delegate.git
+cd OC_Delegate
 ./install.sh
+```
+
+Clone it somewhere permanent: the installed `ocd`, `ocd-guard` and skill are symlinks back into this checkout, so moving or deleting the directory breaks them (re-run `./install.sh` from the new location to fix that).
+
+If the installer warns that `~/.local/bin` is not on your `PATH`, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zshrc` on macOS) and open a new shell. Then check the install:
+
+```bash
+ocd --version
+ocd doctor
 ```
 
 `install.sh` is idempotent and backs up anything it would overwrite before touching it:
@@ -67,6 +77,8 @@ Pass `--with-hooks` to also wire the pre-read hook into Claude Code, Cursor and 
 If `ocd doctor` fails at the end, fix whatever it flagged (see [`ocd doctor`](#ocd-doctor)) before delegating real work — the install itself will have still completed.
 
 ## Usage
+
+`ocd --help` prints the command summary and `ocd --version` the installed version.
 
 A full example: delegate a mechanical rename, review it, and undo it.
 
@@ -676,7 +688,7 @@ The wall timeout is a hard cap on total run time; the stall timeout kills a task
 ## Updating
 
 ```bash
-cd ~/OC_Delegate
+cd /path/to/OC_Delegate
 git pull
 ./install.sh
 ```
@@ -715,10 +727,9 @@ OCD_TEST_SCRATCH=/tmp/ocd-smoke bun test/smoke.ts
 [`test/smoke.ts`](test/smoke.ts) is not a mocked unit-test suite — most checks dispatch real tasks through the real, installed `ocd` (`OCD_TEST_BIN` can override the binary path) against `OCD_TEST_SCRATCH`, so they cost real free-tier calls and take real wall-clock time. Run `ocd doctor` first; a failing precondition there will just show up as confusing test failures. It covers: fault injection against the pure ladder/gate functions (no dispatch), live model selection, the golden hallucination regression, session continuity across two separate process invocations, an edit-plus-revert round trip, parallel scope-conflict detection, and a context-savings measurement (raw transcript bytes vs. envelope bytes).
 
 ```bash
-bun test/models.test.ts
-```
+bun run test               # all three offline suites
+bun run typecheck
 
-```bash
 bun test/models.test.ts    # model selection, ranking, health, ladder routing
 bun test/search.test.ts    # search gate, URL evidence, contract rules
 bun test/guard.test.ts     # editor hook, all three host dialects
@@ -765,3 +776,7 @@ test/guard.test.ts                 editor-hook test suite (offline)
 - **The search agent is the same agent as the edit agent.** Enabling `websearch`/`webfetch` puts attacker-controllable text in front of an agent that also has `bash` and `edit`. Mitigated, not eliminated — see [the web-access tradeoff](#the-web-access-tradeoff-read-this-before-rolling-it-out) for what actually stops what, and for the two-agent split if you need the stronger guarantee.
 - **The editor hook only sees named read tools.** It checks file size before a read, which is the one thing it can know in advance with no false positives. It does not catch a large `Bash`/`shell` read (`cat`, `sed`), a grep over a huge tree, or a sweep of many small files — those need heuristics or session state the hook doesn't have. This matters most on Codex, which routes most file reads through `shell`.
 - **Ladder position doesn't persist across separate CLI invocations.** If a `cont` resumes a session that had already fallen back to an L2 alternate model, and that `cont` itself needs to retry, it re-walks the L2 list from the start rather than remembering which alternates were already tried. `MAX_ROUNDS` bounds the resulting damage, and this got much less frequent once the evidence gate stopped over-triggering on `analyze` tasks. See the doc comment on `runWithLadder` in [`src/ladder.ts`](src/ladder.ts).
+
+## License
+
+[MIT](LICENSE)
