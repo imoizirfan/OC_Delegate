@@ -17,6 +17,7 @@ Installed per machine by cloning this repo and running `./install.sh` — it isn
 - [Task classes](#task-classes)
 - [Web search](#web-search)
 - [Model selection](#model-selection)
+- [Default preference](#default-preference)
 - [Fallback ladder](#fallback-ladder)
 - [Choosing the model yourself](#choosing-the-model-yourself)
 - [Safety model](#safety-model)
@@ -176,7 +177,7 @@ Shows which model would be chosen and why — the inspection surface for [model 
 | `--all` | With `--probe`, probe every candidate instead of stopping at the first healthy one. |
 | `--pin <id>` | Save a model pin to `~/.local/state/ocd/model-pref.json`. Requires a provider-qualified id. |
 | `--prefer <a,b>` | Save a preference order (comma-separated substrings, highest priority first). |
-| `--unpin` | Clear both the saved pin and the saved preference. |
+| `--unpin` | Clear both the saved pin and the saved preference, going back to the [default preference](#default-preference). |
 
 Exits `0` if at least one usable model is available, `1` otherwise.
 
@@ -322,7 +323,7 @@ URL matching requires an **exact host** and treats the path as a prefix. Reusing
 
 ## Model selection
 
-**No model id is hardcoded anywhere.** The provider rotates its free lineup often enough that any written-down id is a scheduled outage. Models are discovered at runtime, filtered, ranked, and health-checked.
+**No model id is pinned anywhere.** The provider rotates its free lineup often enough that any written-down id is a scheduled outage. Models are discovered at runtime, filtered, ranked, and health-checked.
 
 Inspect the current decision at any time:
 
@@ -336,6 +337,14 @@ Selection runs in four stages:
 2. **Filter** — a candidate must be *priced at exactly zero* (`cost.input`, `cost.output`, and both cache rates), support **tool calls**, and be marked `active`. Price is read from the metadata, never inferred from the name: the lineup contains a zero-cost model with no `-free` suffix, so name-matching would be wrong in both directions. A model with a missing or partial `cost` block is treated as **paid** — an unknown price is never assumed free.
 3. **Rank** — there is no quality field in the metadata, so the score is derived from what is actually published, weighted for what this tool does: context window (log-scaled, dominant — `ocd` exists to absorb bulk file reading), release recency, reasoning support, and variant support. Every score is shown with its breakdown in `ocd models`.
 4. **Health-gate** — models that recently failed are sunk to the bottom of the chain.
+
+### Default preference
+
+Out of the box, ranking is biased toward **`ling-3.0-flash`, then `big-pickle`, then `mimo-v2.5`** (`DEFAULT_MODEL_PREFER` in [`src/config.ts`](src/config.ts)). These are name fragments, not pinned ids, so the pipeline above still applies to them in full. Each one still has to be discovered, free, tool-calling and healthy. If one breaks, the ladder moves on to the next. If none of them is in the lineup any more, selection falls back to plain ranking.
+
+They were picked from a head-to-head run on 2026-09-22 (opencode 1.18.31). Every free model the provider offered got the same read and edit tasks. All of them answered correctly, but these three finished in 7–23s. The two `nemotron` models took 46–288s on some runs, and one of them timed out on a probe, even though metadata ranks them higher for their bigger context windows.
+
+A saved `ocd models --prefer` or `OCD_MODEL_PREFER` replaces the default entirely. `ocd models --unpin` goes back to it. To turn it off and rank on metadata alone, set `OCD_MODEL_PREFER=none`, which matches no model. `ocd models` reports the default as `"from": "default"`.
 
 ### Why health-gating is not optional
 
@@ -647,7 +656,7 @@ Environment variables, read at startup:
 | `OCD_STATE_DIR` | `~/.local/state/ocd` | Registry, lock file, transcripts, model cache, and health file live here. |
 | `OCD_MODEL_PROVIDER` | `opencode` | Provider to enumerate models from. Empty string enumerates every authenticated provider. |
 | `OCD_MODEL` | *(unset)* | Escape hatch: pin one model id, bypassing discovery **and** health routing. Intended for debugging a specific model. |
-| `OCD_MODEL_PREFER` | *(empty)* | Comma-separated substrings that bias ranking toward specific models, highest priority first. Empty by default, so nothing is favoured by name out of the box. |
+| `OCD_MODEL_PREFER` | *(unset: the [default preference](#default-preference) applies)* | Comma-separated substrings that bias ranking toward specific models, highest priority first. Replaces the built-in default when set. `none` disables it. |
 | `OCD_GUARD_MAX_BYTES` | `51200` (50KB) | File-size threshold above which the [editor hook](#editor-integration) blocks a direct read. |
 | `OCD_GUARD_DISABLE` | *(unset)* | Set to `1` to turn the editor hook off for a session. |
 
