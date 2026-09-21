@@ -823,6 +823,19 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
 
 // --- entry point ---------------------------------------------------------------
 
+const USAGE =
+  "usage: ocd <run|cont|poll|result|list|drop|revert|models|doctor> ...\n" +
+  '  ocd run --class <read|analyze|edit|test|search> --dir <abs> --tag <name> [--bg] [--scope a,b] "<task>"\n' +
+  '  ocd cont <ref> "<feedback>"\n' +
+  "  ocd poll <ref> [--wait <sec>]\n" +
+  "  ocd result <ref> [--with-diff]\n" +
+  "  ocd list\n" +
+  "  ocd drop <ref>\n" +
+  "  ocd revert <ref>\n" +
+  "  ocd models [--refresh] [--probe] [--all]\n" +
+  "  ocd models --pin <provider/model> | --prefer <substr,substr> | --unpin\n" +
+  "  ocd doctor [--live] [--probe] [--refresh]";
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   switch (args.command) {
@@ -849,20 +862,20 @@ async function main(): Promise<void> {
       if (!jobPath) fail("_bg-worker requires a job file path");
       return cmdBgWorker(jobPath);
     }
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(USAGE);
+      process.exit(0);
+    case "version":
+    case "--version":
+    case "-v": {
+      const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as { version: string };
+      console.log(pkg.version);
+      process.exit(0);
+    }
     default:
-      console.error(
-        "usage: ocd <run|cont|poll|result|list|drop|revert|models|doctor> ...\n" +
-          '  ocd run --class <read|analyze|edit|test|search> --dir <abs> --tag <name> [--bg] [--scope a,b] "<task>"\n' +
-          '  ocd cont <ref> "<feedback>"\n' +
-          "  ocd poll <ref> [--wait <sec>]\n" +
-          "  ocd result <ref> [--with-diff]\n" +
-          "  ocd list\n" +
-          "  ocd drop <ref>\n" +
-          "  ocd revert <ref>\n" +
-          "  ocd models [--refresh] [--probe] [--all]\n" +
-          "  ocd models --pin <provider/model> | --prefer <substr,substr> | --unpin\n" +
-          "  ocd doctor [--live] [--probe] [--refresh]",
-      );
+      console.error(USAGE);
       process.exit(1);
   }
 }
