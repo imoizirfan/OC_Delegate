@@ -2,6 +2,7 @@
   "name": "ocd",
   "version": "0.2.0",
   "description": "Deterministic wrapper CLI that lets a coding agent delegate mechanical, context-heavy subtasks — including web research — to opencode on a runtime-discovered free model, with session continuity, an evidence gate against hallucination, git-verified edits, and a health-gated model fallback ladder.",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "bin": {
