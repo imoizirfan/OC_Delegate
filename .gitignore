@@ -13,3 +13,36 @@ state/
 # framing that has no business in a public clone. Kept in the working tree
 # so it lives alongside the thing it describes, deliberately never committed.
 presentation/
+
+# local environment and secrets — never belong in a public repo
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# editor / OS noise
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+
+# backups the installer writes if run with a config inside the repo, and
+# stray scratch output from manual test runs
+*.bak-*
+*.orig
+*.tsbuildinfo
+coverage/
+ocd-smoke/
+tmp/
+
+# personal agent notes and scratch docs — the only docs that ship are
+# README.md, LICENSE and skill/SKILL.md
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+handoff.md
+NOTES*.md
+notes/
+TODO.md
+*.local.md
