@@ -564,7 +564,6 @@ async function cmdModels(args: ParsedArgs): Promise<void> {
   }
 
   const resolved = await resolveModelChain({ refresh });
-  const health = loadHealth();
 
   let probeOutcomes: Awaited<ReturnType<typeof probeChain>> | null = null;
   if (doProbe) {
@@ -575,6 +574,10 @@ async function cmdModels(args: ParsedArgs): Promise<void> {
   // rather than the stale ordering they were based on.
   const finalChain = doProbe ? (await resolveModelChain({ refresh: false })).chain : resolved.chain;
   const usable = finalChain.filter((c) => !c.benched);
+  // Loaded after probing, never before: the probes rewrite the health file,
+  // and a snapshot taken earlier printed each candidate's pre-probe result
+  // next to a ranking that already reflected the new one.
+  const health = loadHealth();
 
   printJSON({
     ok: usable.length > 0,
