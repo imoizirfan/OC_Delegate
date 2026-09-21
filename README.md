@@ -6,7 +6,7 @@ That covers bulk file reading, mechanical edits, running tests, and (since v0.2.
 
 It exists because a bare `opencode run` has three problems that make it unsafe to hand raw output to Claude: `--format json` inflates content instead of compressing it, the free model will confidently hallucinate filesystem facts with zero tool calls behind them, and the exit code is `0` even when a task was denied by policy. `ocd` fixes all three: it strips tool payloads down to a compact envelope, runs an evidence gate that never trusts the model's prose, and derives status from the real event stream.
 
-Single-user tool — paths default under `$HOME`, not published to any package registry. Installed per machine from this repo.
+Installed per machine by cloning this repo and running `./install.sh` — it isn't published to any package registry, and all state lives under your `$HOME`. MIT licensed.
 
 ## Contents
 
@@ -17,6 +17,7 @@ Single-user tool — paths default under `$HOME`, not published to any package r
 - [Task classes](#task-classes)
 - [Web search](#web-search)
 - [Model selection](#model-selection)
+- [Default preference](#default-preference)
 - [Fallback ladder](#fallback-ladder)
 - [Choosing the model yourself](#choosing-the-model-yourself)
 - [Safety model](#safety-model)
@@ -27,25 +28,35 @@ Single-user tool — paths default under `$HOME`, not published to any package r
 - [Testing](#testing)
 - [Repo layout](#repo-layout)
 - [Known limitations](#known-limitations)
+- [License](#license)
 
 ## Requirements
 
-- [Bun](https://bun.sh) ≥ 1.0 — the CLI runs directly as TypeScript, no build step.
-- [opencode](https://opencode.ai) CLI, authenticated against OpenCode Zen (`opencode auth login`) so the free models are reachable.
+- [Bun](https://bun.sh) ≥ 1.0 — the CLI runs directly as TypeScript, no build step. Install with `brew install oven-sh/bun/bun`, or `curl -fsSL https://bun.sh/install | bash` (the curl installer puts bun in `~/.bun/bin`; open a new shell afterwards so it's on `PATH`).
+- [opencode](https://opencode.ai) CLI. No login is needed for the free models — OpenCode Zen serves them anonymously. Run `opencode auth login` only if `ocd doctor --probe` reports an auth failure.
 - `git`, on `PATH`.
-- macOS or Linux. Built and tested against opencode `1.18.29` and bun `1.3.14`; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.29` and should be re-checked with `ocd doctor` after any opencode upgrade.
+- macOS or Linux. Last verified end to end against opencode `1.18.31` and bun `1.4.2` on macOS; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.31` and should be re-checked with `ocd doctor` after any opencode upgrade.
 - Optional, for [editor integration](#editor-integration): Claude Code, Cursor, or Codex CLI ≥ `0.114` (hooks are stable and on by default as of `0.141`).
 
 Model availability is **not** a requirement you need to check by hand — `ocd` discovers free models at runtime and routes around broken ones. See [Model selection](#model-selection).
 
-**That list is the whole dependency surface.** `ocd` shells out to exactly three binaries — `opencode` (all model work, including web search), `git` (edit verification), and `bun` (its own background worker) — and has one dev dependency, `bun-types`. There is no second model provider, no research CLI, no API key beyond the one `opencode auth login` already manages, and no npm runtime dependencies. If a change would add a fourth binary or a second provider, that is a change to what this tool *is*, not an implementation detail.
+**That list is the whole dependency surface.** `ocd` shells out to exactly three binaries — `opencode` (all model work, including web search), `git` (edit verification), and `bun` (its own background worker) — and has two dev dependencies, `bun-types` and `typescript` (for `bun run typecheck`). There is no second model provider, no research CLI, no API key beyond the one `opencode auth login` already manages, and no npm runtime dependencies. If a change would add a fourth binary or a second provider, that is a change to what this tool *is*, not an implementation detail.
 
 ## Install
 
 ```bash
-git clone git@github.com:imoizirfan/OC_Delegate.git ~/OC_Delegate
-cd ~/OC_Delegate
+git clone https://github.com/imoizirfan/OC_Delegate.git
+cd OC_Delegate
 ./install.sh
+```
+
+Clone it somewhere permanent: the installed `ocd`, `ocd-guard` and skill are symlinks back into this checkout, so moving or deleting the directory breaks them (re-run `./install.sh` from the new location to fix that).
+
+If the installer warns that `~/.local/bin` is not on your `PATH`, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zshrc` on macOS) and open a new shell. Then check the install:
+
+```bash
+ocd --version
+ocd doctor
 ```
 
 `install.sh` is idempotent and backs up anything it would overwrite before touching it:
@@ -67,6 +78,8 @@ Pass `--with-hooks` to also wire the pre-read hook into Claude Code, Cursor and 
 If `ocd doctor` fails at the end, fix whatever it flagged (see [`ocd doctor`](#ocd-doctor)) before delegating real work — the install itself will have still completed.
 
 ## Usage
+
+`ocd --help` prints the command summary and `ocd --version` the installed version.
 
 A full example: delegate a mechanical rename, review it, and undo it.
 
@@ -164,7 +177,7 @@ Shows which model would be chosen and why — the inspection surface for [model 
 | `--all` | With `--probe`, probe every candidate instead of stopping at the first healthy one. |
 | `--pin <id>` | Save a model pin to `~/.local/state/ocd/model-pref.json`. Requires a provider-qualified id. |
 | `--prefer <a,b>` | Save a preference order (comma-separated substrings, highest priority first). |
-| `--unpin` | Clear both the saved pin and the saved preference. |
+| `--unpin` | Clear both the saved pin and the saved preference, going back to the [default preference](#default-preference). |
 
 Exits `0` if at least one usable model is available, `1` otherwise.
 
@@ -182,7 +195,7 @@ Health check, run after install and whenever something looks wrong:
 |---|---|
 | `opencode_binary` | `opencode --version` succeeds. |
 | `git_binary` | `git --version` succeeds. |
-| `opencode_zen_auth` | `opencode providers list` shows real credentials. |
+| `opencode_zen_auth` | `opencode providers list` runs. **Advisory only** — it reports whether credentials are stored but never fails on their absence, because OpenCode Zen's free models answer anonymously. If a probe or dispatch later fails with an auth error, run `opencode auth login`. |
 | `agent_has_no_pinned_model` | The installed agent carries no model id of its own. This is how the tool broke before: a pinned id in the agent config, delisted by the provider, unnoticed. `ocd` passes `--model` per dispatch, so the correct value here is *none*, and anything else means a stale install. |
 | `agent_permissions` | The `ocd-delegate` agent's **live, resolved** permission rules — not just the source jsonc — actually deny the operations this system depends on for safety, **and allow** the two web tools `--class search` needs (see [Safety model](#safety-model)). Resolved config is a flat rules array with base-then-override entries per `(permission, pattern)`; this check takes the *last* matching entry, since that's the one that actually wins. |
 | `registry_writable` | The state directory can be written to. |
@@ -210,7 +223,6 @@ Health check, run after install and whenever something looks wrong:
       "changed": ["src/a.ts", "src/b.ts", "src/c.ts"],
       "insertions": 9,
       "deletions": 9,
-      "branch": "ocd/rename-vars-3f9a1c02",
       "base_head": "e4a1c9f0..."
     }
   },
@@ -311,7 +323,7 @@ URL matching requires an **exact host** and treats the path as a prefix. Reusing
 
 ## Model selection
 
-**No model id is hardcoded anywhere.** The provider rotates its free lineup often enough that any written-down id is a scheduled outage. Models are discovered at runtime, filtered, ranked, and health-checked.
+**No model id is pinned anywhere.** The provider rotates its free lineup often enough that any written-down id is a scheduled outage. Models are discovered at runtime, filtered, ranked, and health-checked.
 
 Inspect the current decision at any time:
 
@@ -325,6 +337,14 @@ Selection runs in four stages:
 2. **Filter** — a candidate must be *priced at exactly zero* (`cost.input`, `cost.output`, and both cache rates), support **tool calls**, and be marked `active`. Price is read from the metadata, never inferred from the name: the lineup contains a zero-cost model with no `-free` suffix, so name-matching would be wrong in both directions. A model with a missing or partial `cost` block is treated as **paid** — an unknown price is never assumed free.
 3. **Rank** — there is no quality field in the metadata, so the score is derived from what is actually published, weighted for what this tool does: context window (log-scaled, dominant — `ocd` exists to absorb bulk file reading), release recency, reasoning support, and variant support. Every score is shown with its breakdown in `ocd models`.
 4. **Health-gate** — models that recently failed are sunk to the bottom of the chain.
+
+### Default preference
+
+Out of the box, ranking is biased toward **`ling-3.0-flash`, then `big-pickle`, then `mimo-v2.5`** (`DEFAULT_MODEL_PREFER` in [`src/config.ts`](src/config.ts)). These are name fragments, not pinned ids, so the pipeline above still applies to them in full. Each one still has to be discovered, free, tool-calling and healthy. If one breaks, the ladder moves on to the next. If none of them is in the lineup any more, selection falls back to plain ranking.
+
+They were picked from a head-to-head run on 2026-09-22 (opencode 1.18.31). Every free model the provider offered got the same read and edit tasks. All of them answered correctly, but these three finished in 7–23s. The two `nemotron` models took 46–288s on some runs, and one of them timed out on a probe, even though metadata ranks them higher for their bigger context windows.
+
+A saved `ocd models --prefer` or `OCD_MODEL_PREFER` replaces the default entirely. `ocd models --unpin` goes back to it. To turn it off and rank on metadata alone, set `OCD_MODEL_PREFER=none`, which matches no model. `ocd models` reports the default as `"from": "default"`.
 
 ### Why health-gating is not optional
 
@@ -636,7 +656,7 @@ Environment variables, read at startup:
 | `OCD_STATE_DIR` | `~/.local/state/ocd` | Registry, lock file, transcripts, model cache, and health file live here. |
 | `OCD_MODEL_PROVIDER` | `opencode` | Provider to enumerate models from. Empty string enumerates every authenticated provider. |
 | `OCD_MODEL` | *(unset)* | Escape hatch: pin one model id, bypassing discovery **and** health routing. Intended for debugging a specific model. |
-| `OCD_MODEL_PREFER` | *(empty)* | Comma-separated substrings that bias ranking toward specific models, highest priority first. Empty by default, so nothing is favoured by name out of the box. |
+| `OCD_MODEL_PREFER` | *(unset: the [default preference](#default-preference) applies)* | Comma-separated substrings that bias ranking toward specific models, highest priority first. Replaces the built-in default when set. `none` disables it. |
 | `OCD_GUARD_MAX_BYTES` | `51200` (50KB) | File-size threshold above which the [editor hook](#editor-integration) blocks a direct read. |
 | `OCD_GUARD_DISABLE` | *(unset)* | Set to `1` to turn the editor hook off for a session. |
 
@@ -676,7 +696,7 @@ The wall timeout is a hard cap on total run time; the stall timeout kills a task
 ## Updating
 
 ```bash
-cd ~/OC_Delegate
+cd /path/to/OC_Delegate
 git pull
 ./install.sh
 ```
@@ -715,16 +735,16 @@ OCD_TEST_SCRATCH=/tmp/ocd-smoke bun test/smoke.ts
 [`test/smoke.ts`](test/smoke.ts) is not a mocked unit-test suite — most checks dispatch real tasks through the real, installed `ocd` (`OCD_TEST_BIN` can override the binary path) against `OCD_TEST_SCRATCH`, so they cost real free-tier calls and take real wall-clock time. Run `ocd doctor` first; a failing precondition there will just show up as confusing test failures. It covers: fault injection against the pure ladder/gate functions (no dispatch), live model selection, the golden hallucination regression, session continuity across two separate process invocations, an edit-plus-revert round trip, parallel scope-conflict detection, and a context-savings measurement (raw transcript bytes vs. envelope bytes).
 
 ```bash
-bun test/models.test.ts
-```
+bun run test               # all four offline suites
+bun run typecheck
 
-```bash
 bun test/models.test.ts    # model selection, ranking, health, ladder routing
 bun test/search.test.ts    # search gate, URL evidence, contract rules
 bun test/guard.test.ts     # editor hook, all three host dialects
+bun test/verify.test.ts    # edit verification: git paths vs --scope
 ```
 
-The three offline suites need no credentials, make no API calls, and redirect state to a temp dir — run them first, since a failure there is a real bug rather than a flaky free model.
+The four offline suites need no credentials, make no API calls, and redirect state to a temp dir — run them first, since a failure there is a real bug rather than a flaky free model.
 
 [`test/search.test.ts`](test/search.test.ts) covers [`--class search`](#web-search): the gate's `no_web_tool_calls` and `phantom_source_reference` paths, host-exact URL matching, tool-output URL scraping, and the assertion that search rules never leak into other classes. [`test/guard.test.ts`](test/guard.test.ts) round-trips the real `bin/ocd-guard` binary as a subprocess against Claude Code, Codex and Cursor payloads — the bytes on stdout and the exit code are all a host ever sees — and asserts every fail-open path.
 
@@ -755,6 +775,7 @@ test/smoke.ts                      end-to-end + fault-injection test suite (live
 test/models.test.ts                model-selection test suite (offline)
 test/search.test.ts                search gate + URL evidence test suite (offline)
 test/guard.test.ts                 editor-hook test suite (offline)
+test/verify.test.ts                edit-verification test suite (offline)
 ```
 
 ## Known limitations
@@ -765,3 +786,7 @@ test/guard.test.ts                 editor-hook test suite (offline)
 - **The search agent is the same agent as the edit agent.** Enabling `websearch`/`webfetch` puts attacker-controllable text in front of an agent that also has `bash` and `edit`. Mitigated, not eliminated — see [the web-access tradeoff](#the-web-access-tradeoff-read-this-before-rolling-it-out) for what actually stops what, and for the two-agent split if you need the stronger guarantee.
 - **The editor hook only sees named read tools.** It checks file size before a read, which is the one thing it can know in advance with no false positives. It does not catch a large `Bash`/`shell` read (`cat`, `sed`), a grep over a huge tree, or a sweep of many small files — those need heuristics or session state the hook doesn't have. This matters most on Codex, which routes most file reads through `shell`.
 - **Ladder position doesn't persist across separate CLI invocations.** If a `cont` resumes a session that had already fallen back to an L2 alternate model, and that `cont` itself needs to retry, it re-walks the L2 list from the start rather than remembering which alternates were already tried. `MAX_ROUNDS` bounds the resulting damage, and this got much less frequent once the evidence gate stopped over-triggering on `analyze` tasks. See the doc comment on `runWithLadder` in [`src/ladder.ts`](src/ladder.ts).
+
+## License
+
+[MIT](LICENSE)

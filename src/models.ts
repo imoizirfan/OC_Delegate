@@ -5,6 +5,7 @@ import {
   MODEL_PROVIDER,
   MODEL_PIN_ENV,
   MODEL_PREFER_ENV,
+  DEFAULT_MODEL_PREFER,
   MODEL_PREF_PATH,
   MODELS_CACHE_PATH,
   MODEL_HEALTH_PATH,
@@ -305,7 +306,7 @@ export function writeModelPref(pref: ModelPrefFile): void {
   writeFileSync(MODEL_PREF_PATH, JSON.stringify(out, null, 2) + "\n");
 }
 
-export type OverrideSource = "env" | "file";
+export type OverrideSource = "env" | "file" | "default";
 
 /** The pin actually in effect, and where it came from.
  *
@@ -327,6 +328,7 @@ export function resolvePrefer(): { list: string[]; from: OverrideSource } | null
   if (MODEL_PREFER_ENV.length) return { list: MODEL_PREFER_ENV, from: "env" };
   const file = readModelPref();
   if (file.prefer?.length) return { list: file.prefer, from: "file" };
+  if (DEFAULT_MODEL_PREFER.length) return { list: DEFAULT_MODEL_PREFER, from: "default" };
   return null;
 }
 

@@ -46,6 +46,10 @@ console.log("=== result-URL extraction (websearch reports URLs in output, not in
 
 eq("urls:none_from_empty", extractResultUrls(undefined), []);
 eq("urls:none_from_prose", extractResultUrls("no links here at all"), []);
+// Seen live: a Wikipedia URL scraped as ".../Bun_(software" with its closing
+// paren cut off, because ")" was a hard terminator.
+eq("urls:balanced_parens_kept", extractResultUrls("see https://en.wikipedia.org/wiki/Bun_(software) for more"), ["https://en.wikipedia.org/wiki/Bun_(software)"]);
+eq("urls:markdown_link_paren_excluded", extractResultUrls("[docs](https://bun.com/docs) and (https://bun.com/blog)."), ["https://bun.com/docs", "https://bun.com/blog"]);
 eq(
   "urls:plain_extraction",
   extractResultUrls('see https://bun.sh/blog/x and http://example.org/a'),

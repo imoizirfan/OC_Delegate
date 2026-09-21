@@ -269,19 +269,28 @@ console.log("\n=== persisted model override (ocd models --pin/--prefer) ===");
   // sets both env vars to "" at the top, so the file layer is what's live.
   eq("pref:empty_by_default", JSON.stringify(readModelPref()), JSON.stringify({ version: 1 }));
   eq("pref:no_pin_by_default", resolvePin(), null);
-  eq("pref:no_prefer_by_default", resolvePrefer(), null);
+  // With nothing saved and no env var, the built-in DEFAULT_MODEL_PREFER is
+  // what's in effect — and it must say so, so it can't be mistaken for a
+  // preference the user set.
+  eq("pref:builtin_prefer_by_default", resolvePrefer()?.from, "default");
+  check(
+    "pref:builtin_prefer_is_substrings_not_ids",
+    (resolvePrefer()?.list ?? []).every((x) => !x.includes("/")),
+    JSON.stringify(resolvePrefer()?.list),
+  );
 
   writeModelPref({ version: 1, pin: "opencode/pinned-x", prefer: ["aa", "bb"] });
   eq("pref:pin_round_trips", resolvePin()?.id, "opencode/pinned-x");
   eq("pref:pin_reports_file_source", resolvePin()?.from, "file");
   eq("pref:prefer_round_trips", JSON.stringify(resolvePrefer()?.list), JSON.stringify(["aa", "bb"]));
+  eq("pref:saved_prefer_beats_builtin", resolvePrefer()?.from, "file");
 
   // Empty fields are dropped rather than persisted as "" / [], so an unpin
   // leaves a file that reads as "no override" instead of "override to
   // nothing" — which resolution would otherwise have to special-case.
   writeModelPref({ version: 1, pin: "", prefer: [] });
   eq("pref:unpin_clears_pin", resolvePin(), null);
-  eq("pref:unpin_clears_prefer", resolvePrefer(), null);
+  eq("pref:unpin_falls_back_to_builtin_prefer", resolvePrefer()?.from, "default");
   eq("pref:unpin_leaves_clean_file", JSON.stringify(readModelPref()), JSON.stringify({ version: 1 }));
 
   // A corrupt override file must never break dispatch — the whole point of

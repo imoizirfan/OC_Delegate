@@ -564,7 +564,6 @@ async function cmdModels(args: ParsedArgs): Promise<void> {
   }
 
   const resolved = await resolveModelChain({ refresh });
-  const health = loadHealth();
 
   let probeOutcomes: Awaited<ReturnType<typeof probeChain>> | null = null;
   if (doProbe) {
@@ -575,6 +574,10 @@ async function cmdModels(args: ParsedArgs): Promise<void> {
   // rather than the stale ordering they were based on.
   const finalChain = doProbe ? (await resolveModelChain({ refresh: false })).chain : resolved.chain;
   const usable = finalChain.filter((c) => !c.benched);
+  // Loaded after probing, never before: the probes rewrite the health file,
+  // and a snapshot taken earlier printed each candidate's pre-probe result
+  // next to a ranking that already reflected the new one.
+  const health = loadHealth();
 
   printJSON({
     ok: usable.length > 0,
@@ -639,7 +642,18 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
     const out = await new Response(proc.stdout).text();
     const code = await proc.exited;
     const hasCreds = /credentials/i.test(out) && !/0 credentials/i.test(out);
-    checks.push({ name: "opencode_zen_auth", ok: code === 0 && hasCreds, detail: hasCreds ? "credentials present" : "no provider credentials found — run `opencode auth login`" });
+    // Advisory, not a gate: OpenCode Zen serves its free models anonymously
+    // (verified against opencode 1.18.31 with zero stored credentials), so a
+    // missing login is not a failure. Failing here made install.sh exit 1 on
+    // every fresh machine that was otherwise fully working. Whether a model
+    // actually answers is model_available --probe / live_dispatch's job.
+    checks.push({
+      name: "opencode_zen_auth",
+      ok: code === 0,
+      detail: hasCreds
+        ? "credentials present"
+        : "no stored credentials — fine for the free models, which answer anonymously; run `opencode auth login` only if a probe or dispatch fails with an auth error",
+    });
   } catch (err) {
     checks.push({ name: "opencode_zen_auth", ok: false, detail: String(err) });
   }
@@ -809,6 +823,19 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
 
 // --- entry point ---------------------------------------------------------------
 
+const USAGE =
+  "usage: ocd <run|cont|poll|result|list|drop|revert|models|doctor> ...\n" +
+  '  ocd run --class <read|analyze|edit|test|search> --dir <abs> --tag <name> [--bg] [--scope a,b] "<task>"\n' +
+  '  ocd cont <ref> "<feedback>"\n' +
+  "  ocd poll <ref> [--wait <sec>]\n" +
+  "  ocd result <ref> [--with-diff]\n" +
+  "  ocd list\n" +
+  "  ocd drop <ref>\n" +
+  "  ocd revert <ref>\n" +
+  "  ocd models [--refresh] [--probe] [--all]\n" +
+  "  ocd models --pin <provider/model> | --prefer <substr,substr> | --unpin\n" +
+  "  ocd doctor [--live] [--probe] [--refresh]";
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   switch (args.command) {
@@ -835,20 +862,20 @@ async function main(): Promise<void> {
       if (!jobPath) fail("_bg-worker requires a job file path");
       return cmdBgWorker(jobPath);
     }
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(USAGE);
+      process.exit(0);
+    case "version":
+    case "--version":
+    case "-v": {
+      const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as { version: string };
+      console.log(pkg.version);
+      process.exit(0);
+    }
     default:
-      console.error(
-        "usage: ocd <run|cont|poll|result|list|drop|revert|models|doctor> ...\n" +
-          '  ocd run --class <read|analyze|edit|test|search> --dir <abs> --tag <name> [--bg] [--scope a,b] "<task>"\n' +
-          '  ocd cont <ref> "<feedback>"\n' +
-          "  ocd poll <ref> [--wait <sec>]\n" +
-          "  ocd result <ref> [--with-diff]\n" +
-          "  ocd list\n" +
-          "  ocd drop <ref>\n" +
-          "  ocd revert <ref>\n" +
-          "  ocd models [--refresh] [--probe] [--all]\n" +
-          "  ocd models --pin <provider/model> | --prefer <substr,substr> | --unpin\n" +
-          "  ocd doctor [--live] [--probe] [--refresh]",
-      );
+      console.error(USAGE);
       process.exit(1);
   }
 }

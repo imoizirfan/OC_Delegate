@@ -29,12 +29,26 @@ export const MODEL_PROVIDER = process.env.OCD_MODEL_PROVIDER ?? "opencode";
 export const MODEL_PIN_ENV = process.env.OCD_MODEL || "";
 
 /** Substrings that bias ranking toward specific models, highest priority
- * first. Empty by default — nothing is favoured by name unless asked. Also
- * the ENV layer only; see MODEL_PREF_PATH. */
+ * first. The ENV layer only; see MODEL_PREF_PATH and DEFAULT_MODEL_PREFER. */
 export const MODEL_PREFER_ENV = (process.env.OCD_MODEL_PREFER || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+/** Built-in preference, used only when neither OCD_MODEL_PREFER nor a saved
+ * `ocd models --prefer` is set. Substrings, deliberately not provider/model
+ * ids: this biases the ranking, it does not pin. Every entry still has to
+ * be discovered, free, tool-calling and healthy, and if none of them is,
+ * selection falls back to normal ranking — so a delisted entry degrades
+ * into "no preference", never into an outage.
+ *
+ * Chosen from a head-to-head run (2026-09-22, opencode 1.18.31) of every
+ * free model the provider offered, on identical read and edit tasks: all
+ * answered correctly, but these three did it in 7–23s, while the two
+ * nemotron models took 46–288s on some runs and one timed out on a probe.
+ * Revisit when the lineup changes; `ocd models --probe --all` shows the
+ * current state. */
+export const DEFAULT_MODEL_PREFER = ["ling-3.0-flash", "big-pickle", "mimo-v2.5"];
 
 export const MODELS_CACHE_PATH = join(STATE_DIR, "models-cache.json");
 export const MODEL_HEALTH_PATH = join(STATE_DIR, "model-health.json");
