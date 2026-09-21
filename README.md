@@ -38,7 +38,7 @@ Single-user tool — paths default under `$HOME`, not published to any package r
 
 Model availability is **not** a requirement you need to check by hand — `ocd` discovers free models at runtime and routes around broken ones. See [Model selection](#model-selection).
 
-**That list is the whole dependency surface.** `ocd` shells out to exactly three binaries — `opencode` (all model work, including web search), `git` (edit verification), and `bun` (its own background worker) — and has one dev dependency, `bun-types`. There is no second model provider, no research CLI, no API key beyond the one `opencode auth login` already manages, and no npm runtime dependencies. If a change would add a fourth binary or a second provider, that is a change to what this tool *is*, not an implementation detail.
+**That list is the whole dependency surface.** `ocd` shells out to exactly three binaries — `opencode` (all model work, including web search), `git` (edit verification), and `bun` (its own background worker) — and has two dev dependencies, `bun-types` and `typescript` (for `bun run typecheck`). There is no second model provider, no research CLI, no API key beyond the one `opencode auth login` already manages, and no npm runtime dependencies. If a change would add a fourth binary or a second provider, that is a change to what this tool *is*, not an implementation detail.
 
 ## Install
 
