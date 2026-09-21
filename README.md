@@ -222,7 +222,6 @@ Health check, run after install and whenever something looks wrong:
       "changed": ["src/a.ts", "src/b.ts", "src/c.ts"],
       "insertions": 9,
       "deletions": 9,
-      "branch": "ocd/rename-vars-3f9a1c02",
       "base_head": "e4a1c9f0..."
     }
   },
