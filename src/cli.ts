@@ -639,7 +639,18 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
     const out = await new Response(proc.stdout).text();
     const code = await proc.exited;
     const hasCreds = /credentials/i.test(out) && !/0 credentials/i.test(out);
-    checks.push({ name: "opencode_zen_auth", ok: code === 0 && hasCreds, detail: hasCreds ? "credentials present" : "no provider credentials found — run `opencode auth login`" });
+    // Advisory, not a gate: OpenCode Zen serves its free models anonymously
+    // (verified against opencode 1.18.31 with zero stored credentials), so a
+    // missing login is not a failure. Failing here made install.sh exit 1 on
+    // every fresh machine that was otherwise fully working. Whether a model
+    // actually answers is model_available --probe / live_dispatch's job.
+    checks.push({
+      name: "opencode_zen_auth",
+      ok: code === 0,
+      detail: hasCreds
+        ? "credentials present"
+        : "no stored credentials — fine for the free models, which answer anonymously; run `opencode auth login` only if a probe or dispatch fails with an auth error",
+    });
   } catch (err) {
     checks.push({ name: "opencode_zen_auth", ok: false, detail: String(err) });
   }

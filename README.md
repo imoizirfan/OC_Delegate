@@ -31,7 +31,7 @@ Single-user tool — paths default under `$HOME`, not published to any package r
 ## Requirements
 
 - [Bun](https://bun.sh) ≥ 1.0 — the CLI runs directly as TypeScript, no build step.
-- [opencode](https://opencode.ai) CLI, authenticated against OpenCode Zen (`opencode auth login`) so the free models are reachable.
+- [opencode](https://opencode.ai) CLI. No login is needed for the free models — OpenCode Zen serves them anonymously. Run `opencode auth login` only if `ocd doctor --probe` reports an auth failure.
 - `git`, on `PATH`.
 - macOS or Linux. Built and tested against opencode `1.18.29` and bun `1.3.14`; the permission-schema findings this system depends on (see [Safety model](#safety-model)) were confirmed against opencode `1.18.16`–`1.18.29` and should be re-checked with `ocd doctor` after any opencode upgrade.
 - Optional, for [editor integration](#editor-integration): Claude Code, Cursor, or Codex CLI ≥ `0.114` (hooks are stable and on by default as of `0.141`).
@@ -182,7 +182,7 @@ Health check, run after install and whenever something looks wrong:
 |---|---|
 | `opencode_binary` | `opencode --version` succeeds. |
 | `git_binary` | `git --version` succeeds. |
-| `opencode_zen_auth` | `opencode providers list` shows real credentials. |
+| `opencode_zen_auth` | `opencode providers list` runs. **Advisory only** — it reports whether credentials are stored but never fails on their absence, because OpenCode Zen's free models answer anonymously. If a probe or dispatch later fails with an auth error, run `opencode auth login`. |
 | `agent_has_no_pinned_model` | The installed agent carries no model id of its own. This is how the tool broke before: a pinned id in the agent config, delisted by the provider, unnoticed. `ocd` passes `--model` per dispatch, so the correct value here is *none*, and anything else means a stale install. |
 | `agent_permissions` | The `ocd-delegate` agent's **live, resolved** permission rules — not just the source jsonc — actually deny the operations this system depends on for safety, **and allow** the two web tools `--class search` needs (see [Safety model](#safety-model)). Resolved config is a flat rules array with base-then-override entries per `(permission, pattern)`; this check takes the *last* matching entry, since that's the one that actually wins. |
 | `registry_writable` | The state directory can be written to. |
